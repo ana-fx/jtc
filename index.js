@@ -14,6 +14,7 @@ import {
   UserSelectMenuBuilder,
 } from 'discord.js';
 import { loadConfig, saveConfig } from './config.js';
+import { loadRooms, saveRooms } from './rooms.js';
 
 const {
   DISCORD_TOKEN,
@@ -23,6 +24,11 @@ const {
 
 // Persistent settings (e.g. default user limit for new rooms).
 const config = loadConfig();
+
+// How long a room may stay empty before the sweeper deletes it.
+const EMPTY_GRACE_MS = 5 * 60 * 1000; // 5 minutes
+// How often the sweeper runs.
+const SWEEP_INTERVAL_MS = 60 * 1000; // 1 minute
 
 if (!DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is not set in the .env file');
@@ -36,10 +42,18 @@ const client = new Client({
   ],
 });
 
-// Rooms created by the bot this session. Map<channelId, { ownerId }>.
+// Rooms created by the bot. Map<channelId, { ownerId, emptySince }>.
+// emptySince is a timestamp (ms) since the room became empty, or null.
 const tempChannels = new Map();
 
-client.once('clientReady', () => {
+// Writes the current room list to disk so it survives a restart.
+function persistRooms() {
+  const rooms = {};
+  for (const [id, room] of tempChannels) rooms[id] = room.ownerId;
+  saveRooms(rooms);
+}
+
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag} (id: ${client.user.id})`);
   console.log(`Default room user limit: ${config.defaultUserLimit} (0 = unlimited)`);
   console.log(`Configured lobby channel: ${JOIN_TO_CREATE_CHANNEL_ID || '(not configured)'}`);
@@ -60,7 +74,74 @@ client.once('clientReady', () => {
       );
     }
   }
+
+  // Re-adopt rooms created before the last restart so orphaned (empty) rooms
+  // still get cleaned up by the sweeper.
+  const persisted = loadRooms();
+  for (const [channelId, ownerId] of Object.entries(persisted)) {
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (channel) {
+        tempChannels.set(channelId, {
+          ownerId,
+          emptySince: channel.members.size === 0 ? Date.now() : null,
+        });
+      }
+    } catch {
+      // Channel no longer exists; drop it.
+    }
+  }
+  persistRooms(); // prune any that were deleted while offline
+  console.log(`Adopted ${tempChannels.size} room(s) from the previous session.`);
+
+  // Start the periodic sweeper.
+  setInterval(() => {
+    sweepRooms().catch((err) => console.error('Sweep error:', err));
+  }, SWEEP_INTERVAL_MS);
 });
+
+/**
+ * Deletes any tracked room that has been empty for longer than EMPTY_GRACE_MS.
+ * Also prunes rooms that were deleted manually.
+ */
+async function sweepRooms() {
+  for (const [channelId, room] of tempChannels) {
+    let channel;
+    try {
+      channel = await client.channels.fetch(channelId);
+    } catch {
+      channel = null;
+    }
+
+    if (!channel) {
+      tempChannels.delete(channelId);
+      persistRooms();
+      continue;
+    }
+
+    if (channel.members.size > 0) {
+      room.emptySince = null;
+      continue;
+    }
+
+    // Room is empty: start / continue the grace timer.
+    if (room.emptySince == null) {
+      room.emptySince = Date.now();
+      continue;
+    }
+
+    if (Date.now() - room.emptySince >= EMPTY_GRACE_MS) {
+      try {
+        await channel.delete('Empty for more than 5 minutes');
+        console.log(`Swept empty room "${channel.name}"`);
+      } catch (err) {
+        console.error('Failed to sweep room:', err);
+      }
+      tempChannels.delete(channelId);
+      persistRooms();
+    }
+  }
+}
 
 /**
  * Builds the control-panel message (embed + buttons) for a room.
@@ -157,7 +238,8 @@ async function createRoomFor(member, lobbyChannel) {
       ],
     });
 
-    tempChannels.set(channel.id, { ownerId: member.id });
+    tempChannels.set(channel.id, { ownerId: member.id, emptySince: null });
+    persistRooms();
 
     // Move the member into the new room (if still connected to voice).
     if (member.voice.channel) {
@@ -189,6 +271,7 @@ async function deleteIfEmpty(channel) {
   try {
     await channel.delete('Voice room is empty, deleted automatically');
     tempChannels.delete(channel.id);
+    persistRooms();
     console.log(`Deleted empty room "${channel.name}"`);
   } catch (err) {
     console.error('Failed to delete room:', err);
@@ -365,6 +448,7 @@ async function handlePanelButton(interaction) {
         });
       }
       room.ownerId = interaction.user.id;
+      persistRooms();
       await channel.permissionOverwrites.edit(interaction.user.id, {
         ManageChannels: true,
         MoveMembers: true,
