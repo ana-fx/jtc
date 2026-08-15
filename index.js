@@ -174,18 +174,22 @@ function buildPanel(channel, ownerId) {
     new ButtonBuilder()
       .setCustomId('vc:lock')
       .setLabel(isLocked ? 'Unlock' : 'Lock')
-      .setStyle(isLocked ? ButtonStyle.Success : ButtonStyle.Danger),
+      .setEmoji(isLocked ? '🔓' : '🔒')
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('vc:hide')
       .setLabel(isHidden ? 'Unhide' : 'Hide')
+      .setEmoji(isHidden ? '👁️' : '🙈')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('vc:limit')
       .setLabel('Limit')
+      .setEmoji('🔢')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('vc:rename')
       .setLabel('Rename')
+      .setEmoji('✏️')
       .setStyle(ButtonStyle.Secondary),
   );
 
@@ -193,18 +197,22 @@ function buildPanel(channel, ownerId) {
     new ButtonBuilder()
       .setCustomId('vc:kick')
       .setLabel('Kick')
+      .setEmoji('👢')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('vc:ban')
       .setLabel('Ban')
-      .setStyle(ButtonStyle.Danger),
+      .setEmoji('🔨')
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('vc:permit')
       .setLabel('Permit')
-      .setStyle(ButtonStyle.Success),
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('vc:claim')
       .setLabel('Claim')
+      .setEmoji('👑')
       .setStyle(ButtonStyle.Secondary),
   );
 
@@ -212,6 +220,7 @@ function buildPanel(channel, ownerId) {
     new ButtonBuilder()
       .setCustomId('vc:invite')
       .setLabel('Invite')
+      .setEmoji('🔗')
       .setStyle(ButtonStyle.Secondary),
   );
 
