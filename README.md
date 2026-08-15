@@ -4,6 +4,7 @@ Bot Discord yang otomatis membuat **voice room** untuk user. Dua cara pakai:
 
 1. **Join to Create** — user cukup masuk ke satu voice channel "lobby", bot langsung membuatkan room baru dan memindahkannya ke sana. Room otomatis **terhapus saat kosong**.
 2. **Slash command `/voice`** — user yang sedang di voice channel bisa membuat room pribadi kapan saja.
+3. **Slash command `/setlimit <count>`** — admin (punya izin *Manage Channels*) mengatur batas maksimal orang yang bisa join tiap room baru. `0` = tanpa batas, maks `99`. Nilainya disimpan di `config.json` dan tetap berlaku setelah bot di-restart.
 
 ---
 

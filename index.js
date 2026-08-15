@@ -5,12 +5,16 @@ import {
   ChannelType,
   PermissionFlagsBits,
 } from 'discord.js';
+import { loadConfig, saveConfig } from './config.js';
 
 const {
   DISCORD_TOKEN,
   JOIN_TO_CREATE_CHANNEL_ID,
   CATEGORY_ID,
 } = process.env;
+
+// Persistent settings (e.g. default user limit for new rooms).
+const config = loadConfig();
 
 if (!DISCORD_TOKEN) {
   console.error('❌ DISCORD_TOKEN is not set in the .env file');
@@ -46,6 +50,8 @@ async function createRoomFor(member, lobbyChannel) {
       name: `🔊 ${member.displayName}'s Room`,
       type: ChannelType.GuildVoice,
       parent: parentId,
+      // 0 = unlimited. Configurable via the /setlimit command.
+      userLimit: config.defaultUserLimit,
       permissionOverwrites: [
         {
           // Give the room owner full control over their channel.
@@ -107,31 +113,57 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 });
 
-// ── Slash command: /voice creates a room manually ──────────────────────────
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'voice') return;
 
-  const member = interaction.member;
-  if (!member?.voice?.channel) {
-    await interaction.reply({
-      content: '⚠️ You must be in a voice channel to use this command.',
-      ephemeral: true,
-    });
+  // ── /voice: create a room manually ───────────────────────────────────────
+  if (interaction.commandName === 'voice') {
+    const member = interaction.member;
+    if (!member?.voice?.channel) {
+      await interaction.reply({
+        content: '⚠️ You must be in a voice channel to use this command.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const room = await createRoomFor(member, member.voice.channel);
+    if (room) {
+      await interaction.reply({
+        content: `✅ Room created: **${room.name}** — you have been moved into it.`,
+        ephemeral: true,
+      });
+    } else {
+      await interaction.reply({
+        content: '❌ Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
+        ephemeral: true,
+      });
+    }
     return;
   }
 
-  const room = await createRoomFor(member, member.voice.channel);
-  if (room) {
+  // ── /setlimit: set the default user limit for new rooms (admins only) ─────
+  if (interaction.commandName === 'setlimit') {
+    // Guard: only members with Manage Channels may change this.
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
+      await interaction.reply({
+        content: '⛔ You need the Manage Channels permission to use this command.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const limit = interaction.options.getInteger('count', true);
+    config.defaultUserLimit = limit;
+    saveConfig(config);
+
+    const label = limit === 0 ? 'unlimited' : `${limit} user(s)`;
+    console.log(`⚙️  ${interaction.user.tag} set default room limit to ${label}`);
     await interaction.reply({
-      content: `✅ Room created: **${room.name}** — you have been moved into it.`,
+      content: `✅ Default room user limit set to **${label}**. This applies to newly created rooms.`,
       ephemeral: true,
     });
-  } else {
-    await interaction.reply({
-      content: '❌ Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
-      ephemeral: true,
-    });
+    return;
   }
 });
 

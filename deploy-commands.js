@@ -1,5 +1,10 @@
 import 'dotenv/config';
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import {
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+} from 'discord.js';
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
 
@@ -13,6 +18,20 @@ const commands = [
     .setName('voice')
     .setDescription('Create a private voice room and move into it')
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName('setlimit')
+    .setDescription('Set the max users for new voice rooms (0 = unlimited)')
+    .addIntegerOption((option) =>
+      option
+        .setName('count')
+        .setDescription('Maximum users per room (0-99, 0 = unlimited)')
+        .setMinValue(0)
+        .setMaxValue(99)
+        .setRequired(true),
+    )
+    // Only members with Manage Channels see/use this command by default.
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    .toJSON(),
 ];
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -23,7 +42,7 @@ try {
     Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
     { body: commands },
   );
-  console.log('✅ Slash command /voice registered for this guild.');
+  console.log('✅ Slash commands /voice and /setlimit registered for this guild.');
 } catch (err) {
   console.error('Failed to register commands:', err);
   process.exit(1);
