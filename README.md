@@ -1,82 +1,89 @@
 # JTC — Discord Voice Room Bot
 
-Bot Discord yang otomatis membuat **voice room** untuk user. Dua cara pakai:
+A Discord bot that automatically creates **voice rooms** for users. Three ways to use it:
 
-1. **Join to Create** — user cukup masuk ke satu voice channel "lobby", bot langsung membuatkan room baru dan memindahkannya ke sana. Room otomatis **terhapus saat kosong**.
-2. **Slash command `/voice`** — user yang sedang di voice channel bisa membuat room pribadi kapan saja.
-3. **Slash command `/setlimit <count>`** — admin (punya izin *Manage Channels*) mengatur batas maksimal orang yang bisa join tiap room baru. `0` = tanpa batas, maks `99`. Nilainya disimpan di `config.json` dan tetap berlaku setelah bot di-restart.
+1. **Join to Create** — a user simply joins a designated "lobby" voice channel, and the bot instantly creates a new room and moves them into it. The room is **automatically deleted once empty**.
+2. **Slash command `/voice`** — a user already in a voice channel can create a private room at any time.
+3. **Slash command `/setlimit <count>`** — an admin (with the *Manage Channels* permission) sets the maximum number of users allowed in each new room. `0` = unlimited, max `99`. The value is stored in `config.json` and persists across restarts.
 
 ---
 
-## 1. Persiapan
+## 1. Prerequisites
 
-Butuh **Node.js versi 18 atau lebih baru**. Cek dengan:
+Requires **Node.js version 18 or newer**. Check with:
 
 ```bash
 node --version
 ```
 
-Install dependency:
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-## 2. Buat Bot di Discord
+## 2. Create the Bot on Discord
 
-1. Buka https://discord.com/developers/applications → **New Application**.
-2. Menu **Bot** → **Reset Token** → salin token → tempel ke `DISCORD_TOKEN` di file `.env`.
-3. Di halaman **Bot**, aktifkan intent **SERVER MEMBERS INTENT** dan **PRESENCE** tidak wajib, tapi biarkan default; yang penting bot pakai *Voice States* (sudah otomatis).
-4. Menu **OAuth2 → URL Generator**: centang scope **`bot`** dan **`applications.commands`**, lalu di **Bot Permissions** centang:
+1. Open https://discord.com/developers/applications → **New Application**.
+2. Go to **Bot** → **Reset Token** → copy the token → paste it into `DISCORD_TOKEN` in the `.env` file.
+3. On the **Bot** page, the *Voice States* intent (used by this bot) is enabled by default; you don't need Server Members or Presence intents.
+4. Go to **OAuth2 → URL Generator**: check the **`bot`** and **`applications.commands`** scopes, then under **Bot Permissions** check:
    - Manage Channels
    - Move Members
    - Connect
    - View Channels
-5. Buka URL yang dihasilkan untuk **invite bot** ke server kamu.
+5. Open the generated URL to **invite the bot** to your server.
 
-## 3. Isi Konfigurasi
+## 3. Configure
 
-Salin template lalu isi nilainya:
+Copy the template and fill in the values:
 
 ```bash
 cp .env.example .env
 ```
 
-Isi `.env`:
+Fill in `.env`:
 
-| Variabel | Cara dapat |
+| Variable | How to get it |
 |---|---|
-| `DISCORD_TOKEN` | Dari halaman Bot (langkah 2) |
+| `DISCORD_TOKEN` | From the Bot page (step 2) |
 | `CLIENT_ID` | General Information → Application ID |
-| `GUILD_ID` | Klik kanan nama server → Copy Server ID |
-| `JOIN_TO_CREATE_CHANNEL_ID` | Buat 1 voice channel bernama misal "➕ Buat Room", klik kanan → Copy Channel ID |
-| `CATEGORY_ID` | (opsional) kategori tempat room baru dibuat |
+| `GUILD_ID` | Right-click the server name → Copy Server ID |
+| `JOIN_TO_CREATE_CHANNEL_ID` | Create a voice channel (e.g. "Join to Create"), right-click it → Copy Channel ID |
+| `CATEGORY_ID` | (optional) category where new rooms are created |
 
-> Untuk bisa "Copy ... ID", aktifkan **Developer Mode** di Discord: Settings → Advanced → Developer Mode.
+> To use "Copy ... ID", enable **Developer Mode** in Discord: Settings → Advanced → Developer Mode.
 
-## 4. Daftarkan Slash Command
+## 4. Register Slash Commands
 
 ```bash
 npm run deploy
 ```
 
-## 5. Jalankan Bot
+## 5. Run the Bot
 
 ```bash
 npm start
 ```
 
-Kalau muncul `✅ Bot login sebagai ...`, bot sudah aktif. Coba masuk ke channel lobby, atau ketik `/voice` di server.
+When you see `Logged in as ...`, the bot is active. Try joining the lobby channel, or type `/voice` in the server.
 
 ---
 
-## Cara Kerja Singkat
+## How It Works
 
-- **`index.js`** — mendengarkan event `voiceStateUpdate`. Saat ada yang masuk lobby, bot membuat channel baru dan memindahkannya. Saat channel buatan bot kosong, channel dihapus.
-- Room yang dibuat bot dilacak selama bot berjalan. **Kalau bot di-restart**, room lama tidak lagi dilacak (tidak akan dihapus otomatis). Untuk pelacakan permanen, perlu disimpan ke database (bisa ditambahkan nanti).
+- **`index.js`** — listens for the `voiceStateUpdate` event. When someone joins the lobby, the bot creates a new channel and moves them into it. When a bot-created channel becomes empty, it is deleted.
+- Rooms are tracked only while the bot is running. **If the bot restarts**, previously created rooms are no longer tracked (and won't be auto-deleted). For permanent tracking, this would need a database (can be added later).
+
+## Deployment
+
+See [DEPLOY.md](DEPLOY.md) for deploying to a VPS with PM2. A GitHub Actions
+workflow ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) is
+included to auto-deploy on every push to `main`.
 
 ## Troubleshooting
 
-- **Bot online tapi tidak bikin room** → cek `JOIN_TO_CREATE_CHANNEL_ID` benar, dan bot punya permission *Manage Channels* + *Move Members* di kategori tersebut.
-- **`/voice` tidak muncul** → jalankan `npm run deploy` lagi, dan pastikan bot di-invite dengan scope `applications.commands`.
-- **Error `Used disallowed intents`** → cek pengaturan intent di Developer Portal.
+- **Bot is online but doesn't create rooms** → check that `JOIN_TO_CREATE_CHANNEL_ID` is correct and that the bot has the *Manage Channels* + *Move Members* permissions on that category.
+- **`/voice` doesn't show up** → run `npm run deploy` again, and make sure the bot was invited with the `applications.commands` scope.
+- **Error `Used disallowed intents`** → check the intent settings in the Developer Portal.
+- **Error 50013 (Missing Permissions)** → the bot needs *Manage Channels* on the specific category where rooms are created; category-level permission overwrites can override server-level ones.
