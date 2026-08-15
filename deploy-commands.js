@@ -8,8 +8,15 @@ import {
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
 
+// Diagnostics: show which config values are loaded (token is masked).
+console.log('--- deploy-commands diagnostics ---');
+console.log('DISCORD_TOKEN :', DISCORD_TOKEN ? `present (ends ...${DISCORD_TOKEN.slice(-6)})` : 'MISSING');
+console.log('CLIENT_ID     :', CLIENT_ID || 'MISSING');
+console.log('GUILD_ID      :', GUILD_ID || 'MISSING');
+console.log('-----------------------------------');
+
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('DISCORD_TOKEN, CLIENT_ID, and GUILD_ID must be set in .env');
+  console.error('ERROR: DISCORD_TOKEN, CLIENT_ID, and GUILD_ID must all be set in .env');
   process.exit(1);
 }
 
@@ -34,16 +41,29 @@ const commands = [
     .toJSON(),
 ];
 
+console.log(
+  `Preparing ${commands.length} command(s): ` +
+    commands.map((c) => `/${c.name}`).join(', '),
+);
+
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 try {
-  console.log('Registering slash commands...');
-  await rest.put(
+  console.log(`Registering guild commands for app ${CLIENT_ID} on guild ${GUILD_ID}...`);
+  const data = await rest.put(
     Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
     { body: commands },
   );
-  console.log('Slash commands /voice and /setlimit registered for this guild.');
+  console.log(`SUCCESS: ${data.length} command(s) now registered on this guild:`);
+  for (const cmd of data) {
+    console.log(`  - /${cmd.name} (id: ${cmd.id})`);
+  }
 } catch (err) {
-  console.error('Failed to register commands:', err);
+  console.error('FAILED to register commands.');
+  // Surface the specific Discord/HTTP details so the exact cause is visible.
+  if (err?.status) console.error('HTTP status   :', err.status);
+  if (err?.code) console.error('Discord code  :', err.code);
+  if (err?.rawError) console.error('Discord body  :', JSON.stringify(err.rawError, null, 2));
+  console.error('Full error:', err);
   process.exit(1);
 }

@@ -33,8 +33,28 @@ const client = new Client({
 const tempChannels = new Set();
 
 client.once('clientReady', () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  console.log(`   Lobby channel: ${JOIN_TO_CREATE_CHANNEL_ID || '(not configured)'}`);
+  console.log(`Logged in as ${client.user.tag} (id: ${client.user.id})`);
+  console.log(`Default room user limit: ${config.defaultUserLimit} (0 = unlimited)`);
+  console.log(`Configured lobby channel: ${JOIN_TO_CREATE_CHANNEL_ID || '(not configured)'}`);
+
+  // Diagnostics: which guilds is the bot actually in, and does the lobby
+  // channel resolve? This reveals a wrong GUILD_ID / wrong-server problem.
+  console.log(`Bot is in ${client.guilds.cache.size} guild(s):`);
+  for (const [id, guild] of client.guilds.cache) {
+    console.log(`  - ${guild.name} (id: ${id})`);
+  }
+
+  if (JOIN_TO_CREATE_CHANNEL_ID) {
+    const lobby = client.channels.cache.get(JOIN_TO_CREATE_CHANNEL_ID);
+    if (lobby) {
+      console.log(`Lobby channel resolved: "${lobby.name}" in guild "${lobby.guild?.name}"`);
+    } else {
+      console.warn(
+        `WARNING: lobby channel ${JOIN_TO_CREATE_CHANNEL_ID} not found. ` +
+          'Check JOIN_TO_CREATE_CHANNEL_ID and that the bot is in that server.',
+      );
+    }
+  }
 });
 
 /**
@@ -98,6 +118,15 @@ async function deleteIfEmpty(channel) {
 }
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
+  // Diagnostic: trace every voice move so join-to-create can be debugged.
+  if (oldState.channelId !== newState.channelId) {
+    console.log(
+      `voiceStateUpdate: ${newState.member?.user.tag} ` +
+        `${oldState.channelId || 'none'} -> ${newState.channelId || 'none'} ` +
+        `(lobby is ${JOIN_TO_CREATE_CHANNEL_ID})`,
+    );
+  }
+
   // 1) A user joined the lobby channel => create a new room for them.
   if (
     newState.channelId === JOIN_TO_CREATE_CHANNEL_ID &&
@@ -115,6 +144,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  console.log(
+    `interaction: /${interaction.commandName} from ${interaction.user.tag} ` +
+      `in guild ${interaction.guildId}`,
+  );
 
   // ── /voice: create a room manually ───────────────────────────────────────
   if (interaction.commandName === 'voice') {
