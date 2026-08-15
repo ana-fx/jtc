@@ -12,6 +12,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   UserSelectMenuBuilder,
+  StringSelectMenuBuilder,
 } from 'discord.js';
 import { loadConfig, saveConfig } from './config.js';
 import { loadRooms, saveRooms } from './rooms.js';
@@ -194,20 +195,27 @@ function buildPanel(channel, ownerId) {
       .setLabel('Kick')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
+      .setCustomId('vc:ban')
+      .setLabel('Ban')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
       .setCustomId('vc:permit')
       .setLabel('Permit')
-      .setStyle(ButtonStyle.Secondary),
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId('vc:claim')
       .setLabel('Claim')
       .setStyle(ButtonStyle.Secondary),
+  );
+
+  const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('vc:invite')
       .setLabel('Invite')
       .setStyle(ButtonStyle.Secondary),
   );
 
-  return { embeds: [embed], components: [row1, row2] };
+  return { embeds: [embed], components: [row1, row2, row3] };
 }
 
 /**
@@ -300,7 +308,10 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('vc:')) {
       return await handlePanelModal(interaction);
     }
-    if (interaction.isUserSelectMenu() && interaction.customId.startsWith('vc:')) {
+    if (
+      (interaction.isUserSelectMenu() || interaction.isStringSelectMenu()) &&
+      interaction.customId.startsWith('vc:')
+    ) {
       return await handlePanelSelect(interaction);
     }
   } catch (err) {
@@ -419,12 +430,35 @@ async function handlePanelButton(interaction) {
       return interaction.showModal(modal);
     }
     case 'kick': {
-      const select = new UserSelectMenuBuilder()
+      // Only offer members currently connected to this room (except the owner).
+      const members = channel.members.filter((m) => m.id !== room.ownerId);
+      if (members.size === 0) {
+        return interaction.reply({
+          content: 'There is no one else in this room to kick.',
+          ephemeral: true,
+        });
+      }
+      const options = members
+        .first(25)
+        .map((m) => ({ label: m.displayName, value: m.id }));
+      const select = new StringSelectMenuBuilder()
         .setCustomId('vc:kickSelect')
-        .setPlaceholder('Select a user to disconnect')
-        .setMaxValues(1);
+        .setPlaceholder('Select a member in this room to disconnect')
+        .setMaxValues(1)
+        .addOptions(options);
       return interaction.reply({
         content: 'Choose who to disconnect from this room:',
+        components: [new ActionRowBuilder().addComponents(select)],
+        ephemeral: true,
+      });
+    }
+    case 'ban': {
+      const select = new UserSelectMenuBuilder()
+        .setCustomId('vc:banSelect')
+        .setPlaceholder('Select a user to ban from this room')
+        .setMaxValues(1);
+      return interaction.reply({
+        content: 'Choose who to ban (they will be blocked from joining). Use Permit to undo.',
         components: [new ActionRowBuilder().addComponents(select)],
         ephemeral: true,
       });
@@ -521,10 +555,28 @@ async function handlePanelSelect(interaction) {
       await member.voice.disconnect('Removed by room owner');
       return interaction.update({ content: `Disconnected <@${targetId}>.`, components: [] });
     }
-    return interaction.update({ content: 'That user is not in this room.', components: [] });
+    return interaction.update({ content: 'That user is no longer in this room.', components: [] });
+  }
+
+  if (interaction.customId === 'vc:banSelect') {
+    if (targetId === room.ownerId) {
+      return interaction.update({ content: 'You cannot ban yourself.', components: [] });
+    }
+    // Block the user from connecting to / seeing this room.
+    await channel.permissionOverwrites.edit(targetId, { Connect: false, ViewChannel: false });
+    // If they are currently inside, disconnect them too.
+    const member = await channel.guild.members.fetch(targetId).catch(() => null);
+    if (member?.voice?.channelId === channel.id) {
+      await member.voice.disconnect('Banned by room owner').catch(() => {});
+    }
+    return interaction.update({
+      content: `Banned <@${targetId}> from this room. Use Permit to undo.`,
+      components: [],
+    });
   }
 
   if (interaction.customId === 'vc:permitSelect') {
+    // Also clears a ban (re-allows Connect + ViewChannel).
     await channel.permissionOverwrites.edit(targetId, { Connect: true, ViewChannel: true });
     return interaction.update({ content: `Permitted <@${targetId}> to join this room.`, components: [] });
   }
