@@ -4,6 +4,14 @@ import {
   GatewayIntentBits,
   ChannelType,
   PermissionFlagsBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  UserSelectMenuBuilder,
 } from 'discord.js';
 import { loadConfig, saveConfig } from './config.js';
 
@@ -28,17 +36,14 @@ const client = new Client({
   ],
 });
 
-// Tracks the IDs of voice channels created by the bot, so they can be
-// deleted once they become empty. Set<channelId>
-const tempChannels = new Set();
+// Rooms created by the bot this session. Map<channelId, { ownerId }>.
+const tempChannels = new Map();
 
 client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag} (id: ${client.user.id})`);
   console.log(`Default room user limit: ${config.defaultUserLimit} (0 = unlimited)`);
   console.log(`Configured lobby channel: ${JOIN_TO_CREATE_CHANNEL_ID || '(not configured)'}`);
 
-  // Diagnostics: which guilds is the bot actually in, and does the lobby
-  // channel resolve? This reveals a wrong GUILD_ID / wrong-server problem.
   console.log(`Bot is in ${client.guilds.cache.size} guild(s):`);
   for (const [id, guild] of client.guilds.cache) {
     console.log(`  - ${guild.name} (id: ${id})`);
@@ -58,8 +63,74 @@ client.once('clientReady', () => {
 });
 
 /**
+ * Builds the control-panel message (embed + buttons) for a room.
+ */
+function buildPanel(channel, ownerId) {
+  const everyone = channel.permissionOverwrites.cache.get(channel.guild.id);
+  const isLocked = everyone?.deny.has(PermissionFlagsBits.Connect) ?? false;
+  const isHidden = everyone?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(channel.name)
+    .setDescription(
+      `Welcome <@${ownerId}> to your voice room!\n` +
+        'Only the owner can use the buttons below to manage this room.',
+    )
+    .addFields(
+      { name: 'Owner', value: `<@${ownerId}>`, inline: true },
+      { name: 'Status', value: isLocked ? 'Locked' : 'Public', inline: true },
+      { name: 'Visibility', value: isHidden ? 'Hidden' : 'Visible', inline: true },
+      {
+        name: 'User limit',
+        value: channel.userLimit === 0 ? 'Unlimited' : String(channel.userLimit),
+        inline: true,
+      },
+    );
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('vc:lock')
+      .setLabel(isLocked ? 'Unlock' : 'Lock')
+      .setStyle(isLocked ? ButtonStyle.Success : ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('vc:hide')
+      .setLabel(isHidden ? 'Unhide' : 'Hide')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('vc:limit')
+      .setLabel('Limit')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('vc:rename')
+      .setLabel('Rename')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('vc:kick')
+      .setLabel('Kick')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('vc:permit')
+      .setLabel('Permit')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('vc:claim')
+      .setLabel('Claim')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('vc:invite')
+      .setLabel('Invite')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  return { embeds: [embed], components: [row1, row2] };
+}
+
+/**
  * Creates a new voice room for a member and moves them into it.
- * @returns {Promise<import('discord.js').VoiceChannel | null>}
  */
 async function createRoomFor(member, lobbyChannel) {
   const guild = member.guild;
@@ -86,11 +157,18 @@ async function createRoomFor(member, lobbyChannel) {
       ],
     });
 
-    tempChannels.add(channel.id);
+    tempChannels.set(channel.id, { ownerId: member.id });
 
     // Move the member into the new room (if still connected to voice).
     if (member.voice.channel) {
       await member.voice.setChannel(channel);
+    }
+
+    // Post the control panel in the room's built-in text chat.
+    try {
+      await channel.send(buildPanel(channel, member.id));
+    } catch (err) {
+      console.error('Failed to send control panel:', err);
     }
 
     console.log(`Created room "${channel.name}" for ${member.user.tag}`);
@@ -118,88 +196,255 @@ async function deleteIfEmpty(channel) {
 }
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  // Diagnostic: trace every voice move so join-to-create can be debugged.
-  if (oldState.channelId !== newState.channelId) {
-    console.log(
-      `voiceStateUpdate: ${newState.member?.user.tag} ` +
-        `${oldState.channelId || 'none'} -> ${newState.channelId || 'none'} ` +
-        `(lobby is ${JOIN_TO_CREATE_CHANNEL_ID})`,
-    );
-  }
-
   // 1) A user joined the lobby channel => create a new room for them.
-  if (
-    newState.channelId === JOIN_TO_CREATE_CHANNEL_ID &&
-    newState.member
-  ) {
+  if (newState.channelId === JOIN_TO_CREATE_CHANNEL_ID && newState.member) {
     await createRoomFor(newState.member, newState.channel);
   }
 
-  // 2) A user left a channel => check whether the old channel (created by
-  //    the bot) is now empty, and delete it if so.
+  // 2) A user left a channel => delete it if it is now an empty bot room.
   if (oldState.channelId && oldState.channelId !== newState.channelId) {
     await deleteIfEmpty(oldState.channel);
   }
 });
 
+// ── Interaction router ──────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+  try {
+    if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
+    if (interaction.isButton() && interaction.customId.startsWith('vc:')) {
+      return await handlePanelButton(interaction);
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('vc:')) {
+      return await handlePanelModal(interaction);
+    }
+    if (interaction.isUserSelectMenu() && interaction.customId.startsWith('vc:')) {
+      return await handlePanelSelect(interaction);
+    }
+  } catch (err) {
+    console.error('Interaction handler error:', err);
+    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      interaction
+        .reply({
+          content:
+            'Something went wrong. The bot may be missing a permission ' +
+            '(Manage Roles / Manage Channels / Create Invite).',
+          ephemeral: true,
+        })
+        .catch(() => {});
+    }
+  }
+});
 
+// Resolves the room record for the channel the interaction happened in.
+function getRoom(interaction) {
+  const channel = interaction.channel;
+  if (!channel || !tempChannels.has(channel.id)) return null;
+  return { channel, room: tempChannels.get(channel.id) };
+}
+
+async function handleSlashCommand(interaction) {
   console.log(
     `interaction: /${interaction.commandName} from ${interaction.user.tag} ` +
       `in guild ${interaction.guildId}`,
   );
 
-  // ── /voice: create a room manually ───────────────────────────────────────
   if (interaction.commandName === 'voice') {
     const member = interaction.member;
     if (!member?.voice?.channel) {
-      await interaction.reply({
+      return interaction.reply({
         content: 'You must be in a voice channel to use this command.',
         ephemeral: true,
       });
-      return;
     }
-
     const room = await createRoomFor(member, member.voice.channel);
-    if (room) {
-      await interaction.reply({
-        content: `Room created: **${room.name}** — you have been moved into it.`,
-        ephemeral: true,
-      });
-    } else {
-      await interaction.reply({
-        content: 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
-        ephemeral: true,
-      });
-    }
-    return;
+    return interaction.reply({
+      content: room
+        ? `Room created: **${room.name}** — you have been moved into it.`
+        : 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
+      ephemeral: true,
+    });
   }
 
-  // ── /setlimit: set the default user limit for new rooms (admins only) ─────
   if (interaction.commandName === 'setlimit') {
-    // Guard: only members with Manage Channels may change this.
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
-      await interaction.reply({
+      return interaction.reply({
         content: 'You need the Manage Channels permission to use this command.',
         ephemeral: true,
       });
-      return;
     }
-
     const limit = interaction.options.getInteger('count', true);
     config.defaultUserLimit = limit;
     saveConfig(config);
-
     const label = limit === 0 ? 'unlimited' : `${limit} user(s)`;
     console.log(`${interaction.user.tag} set default room limit to ${label}`);
-    await interaction.reply({
+    return interaction.reply({
       content: `Default room user limit set to **${label}**. This applies to newly created rooms.`,
       ephemeral: true,
     });
-    return;
   }
-});
+}
+
+async function handlePanelButton(interaction) {
+  const info = getRoom(interaction);
+  if (!info) {
+    return interaction.reply({ content: 'This panel is no longer active.', ephemeral: true });
+  }
+  const { channel, room } = info;
+  const action = interaction.customId.split(':')[1];
+  const everyoneId = channel.guild.id;
+
+  // Every action except "claim" is owner-only.
+  if (action !== 'claim' && interaction.user.id !== room.ownerId) {
+    return interaction.reply({
+      content: 'Only the room owner can use these controls.',
+      ephemeral: true,
+    });
+  }
+
+  switch (action) {
+    case 'lock': {
+      const locked =
+        channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.Connect) ?? false;
+      await channel.permissionOverwrites.edit(everyoneId, { Connect: locked ? null : false });
+      return interaction.update(buildPanel(channel, room.ownerId));
+    }
+    case 'hide': {
+      const hidden =
+        channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
+      await channel.permissionOverwrites.edit(everyoneId, { ViewChannel: hidden ? null : false });
+      return interaction.update(buildPanel(channel, room.ownerId));
+    }
+    case 'limit': {
+      const modal = new ModalBuilder().setCustomId('vc:limitModal').setTitle('Set user limit');
+      const input = new TextInputBuilder()
+        .setCustomId('value')
+        .setLabel('Max users (0-99, 0 = unlimited)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal);
+    }
+    case 'rename': {
+      const modal = new ModalBuilder().setCustomId('vc:renameModal').setTitle('Rename room');
+      const input = new TextInputBuilder()
+        .setCustomId('value')
+        .setLabel('New room name')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(100);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal);
+    }
+    case 'kick': {
+      const select = new UserSelectMenuBuilder()
+        .setCustomId('vc:kickSelect')
+        .setPlaceholder('Select a user to disconnect')
+        .setMaxValues(1);
+      return interaction.reply({
+        content: 'Choose who to disconnect from this room:',
+        components: [new ActionRowBuilder().addComponents(select)],
+        ephemeral: true,
+      });
+    }
+    case 'permit': {
+      const select = new UserSelectMenuBuilder()
+        .setCustomId('vc:permitSelect')
+        .setPlaceholder('Select a user to permit')
+        .setMaxValues(1);
+      return interaction.reply({
+        content: 'Choose who to permit (allow to join and see this room):',
+        components: [new ActionRowBuilder().addComponents(select)],
+        ephemeral: true,
+      });
+    }
+    case 'claim': {
+      if (channel.members.has(room.ownerId)) {
+        return interaction.reply({
+          content: 'The current owner is still here — you cannot claim this room.',
+          ephemeral: true,
+        });
+      }
+      room.ownerId = interaction.user.id;
+      await channel.permissionOverwrites.edit(interaction.user.id, {
+        ManageChannels: true,
+        MoveMembers: true,
+        MuteMembers: true,
+        Connect: true,
+      });
+      return interaction.update(buildPanel(channel, room.ownerId));
+    }
+    case 'invite': {
+      const invite = await channel.createInvite({ maxAge: 3600, maxUses: 0 });
+      return interaction.reply({
+        content: `Invite link (valid for 1 hour): ${invite.url}`,
+        ephemeral: true,
+      });
+    }
+    default:
+      return interaction.reply({ content: 'Unknown action.', ephemeral: true });
+  }
+}
+
+async function handlePanelModal(interaction) {
+  const info = getRoom(interaction);
+  if (!info) {
+    return interaction.reply({ content: 'This panel is no longer active.', ephemeral: true });
+  }
+  const { channel, room } = info;
+  if (interaction.user.id !== room.ownerId) {
+    return interaction.reply({ content: 'Only the room owner can do that.', ephemeral: true });
+  }
+  const value = interaction.fields.getTextInputValue('value').trim();
+
+  if (interaction.customId === 'vc:limitModal') {
+    const n = Number.parseInt(value, 10);
+    if (Number.isNaN(n) || n < 0 || n > 99) {
+      return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
+    }
+    await channel.setUserLimit(n);
+    if (interaction.message) {
+      await interaction.message.edit(buildPanel(channel, room.ownerId)).catch(() => {});
+    }
+    return interaction.reply({
+      content: `User limit set to ${n === 0 ? 'unlimited' : n}.`,
+      ephemeral: true,
+    });
+  }
+
+  if (interaction.customId === 'vc:renameModal') {
+    await channel.setName(value);
+    if (interaction.message) {
+      await interaction.message.edit(buildPanel(channel, room.ownerId)).catch(() => {});
+    }
+    return interaction.reply({ content: `Room renamed to "${value}".`, ephemeral: true });
+  }
+}
+
+async function handlePanelSelect(interaction) {
+  const info = getRoom(interaction);
+  if (!info) {
+    return interaction.update({ content: 'This panel is no longer active.', components: [] });
+  }
+  const { channel, room } = info;
+  if (interaction.user.id !== room.ownerId) {
+    return interaction.update({ content: 'Only the room owner can do that.', components: [] });
+  }
+  const targetId = interaction.values[0];
+
+  if (interaction.customId === 'vc:kickSelect') {
+    const member = await channel.guild.members.fetch(targetId).catch(() => null);
+    if (member?.voice?.channelId === channel.id) {
+      await member.voice.disconnect('Removed by room owner');
+      return interaction.update({ content: `Disconnected <@${targetId}>.`, components: [] });
+    }
+    return interaction.update({ content: 'That user is not in this room.', components: [] });
+  }
+
+  if (interaction.customId === 'vc:permitSelect') {
+    await channel.permissionOverwrites.edit(targetId, { Connect: true, ViewChannel: true });
+    return interaction.update({ content: `Permitted <@${targetId}> to join this room.`, components: [] });
+  }
+}
 
 // Note: rooms are only tracked for the current session. After a restart,
 // previously created rooms are no longer tracked (and won't be auto-deleted).
