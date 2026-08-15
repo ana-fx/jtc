@@ -9,7 +9,7 @@ import {
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('❌ DISCORD_TOKEN, CLIENT_ID, and GUILD_ID must be set in .env');
+  console.error('DISCORD_TOKEN, CLIENT_ID, and GUILD_ID must be set in .env');
   process.exit(1);
 }
 
@@ -37,12 +37,12 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 try {
-  console.log('⏳ Registering slash commands...');
+  console.log('Registering slash commands...');
   await rest.put(
     Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
     { body: commands },
   );
-  console.log('✅ Slash commands /voice and /setlimit registered for this guild.');
+  console.log('Slash commands /voice and /setlimit registered for this guild.');
 } catch (err) {
   console.error('Failed to register commands:', err);
   process.exit(1);

@@ -17,7 +17,7 @@ const {
 const config = loadConfig();
 
 if (!DISCORD_TOKEN) {
-  console.error('❌ DISCORD_TOKEN is not set in the .env file');
+  console.error('DISCORD_TOKEN is not set in the .env file');
   process.exit(1);
 }
 
@@ -33,7 +33,7 @@ const client = new Client({
 const tempChannels = new Set();
 
 client.once('clientReady', () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`Logged in as ${client.user.tag}`);
   console.log(`   Lobby channel: ${JOIN_TO_CREATE_CHANNEL_ID || '(not configured)'}`);
 });
 
@@ -47,7 +47,7 @@ async function createRoomFor(member, lobbyChannel) {
 
   try {
     const channel = await guild.channels.create({
-      name: `🔊 ${member.displayName}'s Room`,
+      name: `${member.displayName}'s Room`,
       type: ChannelType.GuildVoice,
       parent: parentId,
       // 0 = unlimited. Configurable via the /setlimit command.
@@ -73,7 +73,7 @@ async function createRoomFor(member, lobbyChannel) {
       await member.voice.setChannel(channel);
     }
 
-    console.log(`➕ Created room "${channel.name}" for ${member.user.tag}`);
+    console.log(`Created room "${channel.name}" for ${member.user.tag}`);
     return channel;
   } catch (err) {
     console.error('Failed to create room:', err);
@@ -91,7 +91,7 @@ async function deleteIfEmpty(channel) {
   try {
     await channel.delete('Voice room is empty, deleted automatically');
     tempChannels.delete(channel.id);
-    console.log(`➖ Deleted empty room "${channel.name}"`);
+    console.log(`Deleted empty room "${channel.name}"`);
   } catch (err) {
     console.error('Failed to delete room:', err);
   }
@@ -121,7 +121,7 @@ client.on('interactionCreate', async (interaction) => {
     const member = interaction.member;
     if (!member?.voice?.channel) {
       await interaction.reply({
-        content: '⚠️ You must be in a voice channel to use this command.',
+        content: 'You must be in a voice channel to use this command.',
         ephemeral: true,
       });
       return;
@@ -130,12 +130,12 @@ client.on('interactionCreate', async (interaction) => {
     const room = await createRoomFor(member, member.voice.channel);
     if (room) {
       await interaction.reply({
-        content: `✅ Room created: **${room.name}** — you have been moved into it.`,
+        content: `Room created: **${room.name}** — you have been moved into it.`,
         ephemeral: true,
       });
     } else {
       await interaction.reply({
-        content: '❌ Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
+        content: 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
         ephemeral: true,
       });
     }
@@ -147,7 +147,7 @@ client.on('interactionCreate', async (interaction) => {
     // Guard: only members with Manage Channels may change this.
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
       await interaction.reply({
-        content: '⛔ You need the Manage Channels permission to use this command.',
+        content: 'You need the Manage Channels permission to use this command.',
         ephemeral: true,
       });
       return;
@@ -158,9 +158,9 @@ client.on('interactionCreate', async (interaction) => {
     saveConfig(config);
 
     const label = limit === 0 ? 'unlimited' : `${limit} user(s)`;
-    console.log(`⚙️  ${interaction.user.tag} set default room limit to ${label}`);
+    console.log(`${interaction.user.tag} set default room limit to ${label}`);
     await interaction.reply({
-      content: `✅ Default room user limit set to **${label}**. This applies to newly created rooms.`,
+      content: `Default room user limit set to **${label}**. This applies to newly created rooms.`,
       ephemeral: true,
     });
     return;
