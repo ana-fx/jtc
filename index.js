@@ -21,10 +21,32 @@ const {
   DISCORD_TOKEN,
   JOIN_TO_CREATE_CHANNEL_ID,
   CATEGORY_ID,
+  LOBBIES,
 } = process.env;
 
 // Persistent settings (e.g. default user limit for new rooms).
 const config = loadConfig();
+
+/**
+ * Parses the LOBBIES env var into a Map<lobbyChannelId, { min, max }>.
+ * Format: "<channelId>:<minLimit>:<maxLimit>,..." — maxLimit 0 means no
+ * upper bound. Rooms created from a configured lobby start at minLimit and
+ * the owner can only set a limit within [min, max].
+ */
+function parseLobbies(raw) {
+  const map = new Map();
+  if (!raw) return map;
+  for (const entry of raw.split(',')) {
+    const [id, min, max] = entry.trim().split(':');
+    if (!id) continue;
+    map.set(id, {
+      min: Math.max(0, Number.parseInt(min, 10) || 0),
+      max: Math.max(0, Number.parseInt(max, 10) || 0),
+    });
+  }
+  return map;
+}
+const lobbies = parseLobbies(LOBBIES);
 
 // How long a room may stay empty before the sweeper deletes it.
 const EMPTY_GRACE_MS = 5 * 60 * 1000; // 5 minutes
@@ -43,14 +65,17 @@ const client = new Client({
   ],
 });
 
-// Rooms created by the bot. Map<channelId, { ownerId, emptySince }>.
+// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max }>.
 // emptySince is a timestamp (ms) since the room became empty, or null.
+// min/max define the allowed user-limit range (0 max = no upper bound).
 const tempChannels = new Map();
 
 // Writes the current room list to disk so it survives a restart.
 function persistRooms() {
   const rooms = {};
-  for (const [id, room] of tempChannels) rooms[id] = room.ownerId;
+  for (const [id, room] of tempChannels) {
+    rooms[id] = { ownerId: room.ownerId, min: room.min ?? 0, max: room.max ?? 0 };
+  }
   saveRooms(rooms);
 }
 
@@ -76,15 +101,30 @@ client.once('clientReady', async () => {
     }
   }
 
+  console.log(`Configured limit lobbies: ${lobbies.size}`);
+  for (const [id, cfg] of lobbies) {
+    const ch = client.channels.cache.get(id);
+    const range = cfg.max === 0 ? `min ${cfg.min}` : `${cfg.min}-${cfg.max}`;
+    if (ch) {
+      console.log(`  - "${ch.name}" (${id}) limit ${range}`);
+    } else {
+      console.warn(`  - WARNING: lobby ${id} (limit ${range}) not found on this server`);
+    }
+  }
+
   // Re-adopt rooms created before the last restart so orphaned (empty) rooms
   // still get cleaned up by the sweeper.
   const persisted = loadRooms();
-  for (const [channelId, ownerId] of Object.entries(persisted)) {
+  for (const [channelId, saved] of Object.entries(persisted)) {
     try {
       const channel = await client.channels.fetch(channelId);
       if (channel) {
+        // Backward compat: old format stored just the owner id string.
+        const record = typeof saved === 'string' ? { ownerId: saved } : saved;
         tempChannels.set(channelId, {
-          ownerId,
+          ownerId: record.ownerId,
+          min: record.min ?? 0,
+          max: record.max ?? 0,
           emptySince: channel.members.size === 0 ? Date.now() : null,
         });
       }
@@ -170,6 +210,16 @@ function buildPanel(channel, ownerId) {
       },
     );
 
+  // Show the allowed limit range for rooms created from a configured lobby.
+  const record = tempChannels.get(channel.id);
+  if (record && (record.min > 0 || record.max > 0)) {
+    embed.addFields({
+      name: 'Allowed limit',
+      value: record.max === 0 ? `min ${record.min}` : `${record.min}-${record.max}`,
+      inline: true,
+    });
+  }
+
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('vc:lock')
@@ -229,18 +279,26 @@ function buildPanel(channel, ownerId) {
 
 /**
  * Creates a new voice room for a member and moves them into it.
+ * When lobbyCfg is set (a configured limit lobby), the room starts at the
+ * lobby's minimum limit, is named after the lobby, and stays in the lobby's
+ * own category so each room type groups under its lobby.
  */
-async function createRoomFor(member, lobbyChannel) {
+async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
   const guild = member.guild;
-  const parentId = CATEGORY_ID || lobbyChannel.parentId || null;
+  const parentId = lobbyCfg
+    ? lobbyChannel.parentId || null
+    : CATEGORY_ID || lobbyChannel.parentId || null;
 
   try {
     const channel = await guild.channels.create({
-      name: `${member.displayName}'s Room`,
+      name: lobbyCfg
+        ? `${lobbyChannel.name} - ${member.displayName}`
+        : `${member.displayName}'s Room`,
       type: ChannelType.GuildVoice,
       parent: parentId,
-      // 0 = unlimited. Configurable via the /setlimit command.
-      userLimit: config.defaultUserLimit,
+      // Configured lobbies start at their minimum; otherwise the global
+      // default from /setlimit applies (0 = unlimited).
+      userLimit: lobbyCfg ? lobbyCfg.min : config.defaultUserLimit,
       permissionOverwrites: [
         {
           // Give the room owner full control over their channel.
@@ -255,7 +313,12 @@ async function createRoomFor(member, lobbyChannel) {
       ],
     });
 
-    tempChannels.set(channel.id, { ownerId: member.id, emptySince: null });
+    tempChannels.set(channel.id, {
+      ownerId: member.id,
+      emptySince: null,
+      min: lobbyCfg?.min ?? 0,
+      max: lobbyCfg?.max ?? 0,
+    });
     persistRooms();
 
     // Move the member into the new room (if still connected to voice).
@@ -296,9 +359,16 @@ async function deleteIfEmpty(channel) {
 }
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  // 1) A user joined the lobby channel => create a new room for them.
-  if (newState.channelId === JOIN_TO_CREATE_CHANNEL_ID && newState.member) {
-    await createRoomFor(newState.member, newState.channel);
+  // 1) A user joined a lobby channel => create a new room for them.
+  //    Configured limit lobbies take their own min/max; the legacy single
+  //    lobby (JOIN_TO_CREATE_CHANNEL_ID) uses the global default limit.
+  if (newState.member && newState.channelId && oldState.channelId !== newState.channelId) {
+    const lobbyCfg = lobbies.get(newState.channelId);
+    if (lobbyCfg) {
+      await createRoomFor(newState.member, newState.channel, lobbyCfg);
+    } else if (newState.channelId === JOIN_TO_CREATE_CHANNEL_ID) {
+      await createRoomFor(newState.member, newState.channel);
+    }
   }
 
   // 2) A user left a channel => delete it if it is now an empty bot room.
@@ -418,10 +488,20 @@ async function handlePanelButton(interaction) {
       return interaction.update(buildPanel(channel, room.ownerId));
     }
     case 'limit': {
+      const min = room.min ?? 0;
+      const max = room.max ?? 0;
+      let label;
+      if (min === 0 && max === 0) {
+        label = 'Max users (0-99, 0 = unlimited)';
+      } else if (max === 0) {
+        label = `Max users (minimum ${min})`;
+      } else {
+        label = `Max users (${min}-${max})`;
+      }
       const modal = new ModalBuilder().setCustomId('vc:limitModal').setTitle('Set user limit');
       const input = new TextInputBuilder()
         .setCustomId('value')
-        .setLabel('Max users (0-99, 0 = unlimited)')
+        .setLabel(label)
         .setStyle(TextInputStyle.Short)
         .setRequired(true);
       modal.addComponents(new ActionRowBuilder().addComponents(input));
@@ -527,6 +607,21 @@ async function handlePanelModal(interaction) {
     const n = Number.parseInt(value, 10);
     if (Number.isNaN(n) || n < 0 || n > 99) {
       return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
+    }
+    // Enforce the room's allowed range (set by the lobby it was created from).
+    const min = room.min ?? 0;
+    const max = room.max ?? 0;
+    if (min > 0 && n < min) {
+      return interaction.reply({
+        content: `This room type requires a limit of at least ${min}.`,
+        ephemeral: true,
+      });
+    }
+    if (max > 0 && n > max) {
+      return interaction.reply({
+        content: `This room type allows a limit of at most ${max}.`,
+        ephemeral: true,
+      });
     }
     await channel.setUserLimit(n);
     if (interaction.message) {
