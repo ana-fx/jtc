@@ -1,11 +1,12 @@
-name: Deploy to VPS
+name: Deploy Snowy bots to VPS
 
-# Auto-deploy on every push to main. The job SSHes into the VPS, pulls the
-# latest code, installs dependencies, (re)registers slash commands, and
-# restarts the bot under PM2.
+# Auto-deploy on every push to the snowy branch. The job SSHes into the VPS,
+# updates the client bots' own directory (~/snowy-bot), installs dependencies,
+# (re)registers slash commands for each instance, and restarts them under PM2.
+# The owner's personal bot lives in ~/jtc-bot and is deployed from main.
 on:
   push:
-    branches: [main]
+    branches: [snowy]
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 jobs:
@@ -21,11 +22,17 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           script: |
             set -e
-            cd ~/jtc-bot
-            git pull origin main
+            # First-time setup: clone the snowy branch into its own directory.
+            if [ ! -d ~/snowy-bot ]; then
+              git clone -b snowy https://github.com/ana-fx/jtc.git ~/snowy-bot
+            fi
+            cd ~/snowy-bot
+            # fetch+reset is resilient even if branch history is rewritten.
+            git fetch origin snowy
+            git reset --hard origin/snowy
             npm ci --omit=dev
             # Register slash commands for every configured bot instance.
-            for f in .env .env.elsa .env.anna .env.olaf; do
+            for f in .env.elsa .env.anna .env.olaf; do
               if [ -f "$f" ]; then
                 echo "Registering commands using $f"
                 DOTENV_CONFIG_PATH="$f" npm run deploy
