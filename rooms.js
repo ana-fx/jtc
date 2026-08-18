@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOMS_PATH = join(__dirname, 'rooms.json');
+
+// BOT_INSTANCE keeps each instance's room list separate (see config.js).
+const suffix = process.env.BOT_INSTANCE ? `.${process.env.BOT_INSTANCE}` : '';
+const ROOMS_PATH = join(__dirname, `rooms${suffix}.json`);
 
 export function loadRooms() {
   if (!existsSync(ROOMS_PATH)) return {};

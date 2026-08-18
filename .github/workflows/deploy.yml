@@ -24,5 +24,13 @@ jobs:
             cd ~/jtc-bot
             git pull origin main
             npm ci --omit=dev
-            npm run deploy
-            pm2 restart jtc-voice-bot
+            # Register slash commands for every configured bot instance.
+            for f in .env .env.elsa .env.anna; do
+              if [ -f "$f" ]; then
+                echo "Registering commands using $f"
+                DOTENV_CONFIG_PATH="$f" npm run deploy
+              fi
+            done
+            # Start/restart every instance whose env file exists.
+            pm2 startOrRestart ecosystem.config.cjs
+            pm2 save

@@ -4,7 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = join(__dirname, 'config.json');
+
+// BOT_INSTANCE allows several bot instances (e.g. "elsa", "anna") to run
+// from this same directory without overwriting each other's settings.
+const suffix = process.env.BOT_INSTANCE ? `.${process.env.BOT_INSTANCE}` : '';
+const CONFIG_PATH = join(__dirname, `config${suffix}.json`);
 
 // defaultUserLimit: max users allowed in each new room. 0 = unlimited.
 const DEFAULTS = { defaultUserLimit: 0 };
