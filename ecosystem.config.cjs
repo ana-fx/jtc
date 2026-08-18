@@ -5,6 +5,7 @@
 //   .env       -> app "jtc-voice-bot"  (legacy single-bot setup)
 //   .env.elsa  -> app "elsa-room-bot"  (Family Room lobby, limit 7+)
 //   .env.anna  -> app "anna-room-bot"  (Bedroom 1-3 + Library 4-6 lobbies)
+//   .env.olaf  -> app "olaf-room-bot"  (Game Room lobby, no limit)
 // Only instances whose env file exists are started, so this file works both
 // before and after the multi-bot env files are created.
 //
@@ -35,7 +36,7 @@ if (existsSync(join(__dirname, '.env'))) {
 }
 
 // Named instances: .env.<instance> -> "<instance>-room-bot"
-for (const instance of ['elsa', 'anna']) {
+for (const instance of ['elsa', 'anna', 'olaf']) {
   const envFile = join(__dirname, `.env.${instance}`);
   if (existsSync(envFile)) {
     apps.push({

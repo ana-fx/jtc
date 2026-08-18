@@ -25,7 +25,7 @@ jobs:
             git pull origin main
             npm ci --omit=dev
             # Register slash commands for every configured bot instance.
-            for f in .env .env.elsa .env.anna; do
+            for f in .env .env.elsa .env.anna .env.olaf; do
               if [ -f "$f" ]; then
                 echo "Registering commands using $f"
                 DOTENV_CONFIG_PATH="$f" npm run deploy
