@@ -22,7 +22,10 @@ jobs:
           script: |
             set -e
             cd ~/jtc-bot
-            git pull origin main
+            # fetch+reset keeps the VPS exactly on origin/main, even after a
+            # history rewrite (a plain pull would try to merge old commits).
+            git fetch origin main
+            git reset --hard origin/main
             npm ci --omit=dev
             npm run deploy
             pm2 restart jtc-voice-bot
