@@ -11,7 +11,10 @@ const suffix = process.env.BOT_INSTANCE ? `.${process.env.BOT_INSTANCE}` : '';
 const CONFIG_PATH = join(__dirname, `config${suffix}.json`);
 
 // defaultUserLimit: max users allowed in each new room. 0 = unlimited.
-const DEFAULTS = { defaultUserLimit: 0 };
+// panelMessages: { [categoryId]: { channelId, messageId } } — locates the
+// one static control panel posted per category, so it isn't reposted on
+// every restart.
+const DEFAULTS = { defaultUserLimit: 0, panelMessages: {} };
 
 export function loadConfig() {
   if (!existsSync(CONFIG_PATH)) return { ...DEFAULTS };

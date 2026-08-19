@@ -65,49 +65,24 @@ const client = new Client({
   ],
 });
 
-// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max,
-// panelChannelId, panelMessageId, panelIsThread }>. emptySince is a
-// timestamp (ms) since the room became empty, or null. min/max define the
-// allowed user-limit range (0 max = no upper bound). panelChannelId/
-// panelMessageId locate the control panel; panelIsThread marks it as a
-// private thread (deleted whole) rather than a plain message.
+// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max }>.
+// emptySince is a timestamp (ms) since the room became empty, or null.
+// min/max define the allowed user-limit range (0 max = no upper bound).
+//
+// There is no per-room panel message to track: a single static control
+// panel is posted once per category (in its #pengaturan channel, see
+// ensureSettingsPanel) and every button/modal/select resolves "the room" by
+// looking at the voice channel the clicking member is currently connected
+// to — not by an id baked into the component.
 const tempChannels = new Map();
 
 // Writes the current room list to disk so it survives a restart.
 function persistRooms() {
   const rooms = {};
   for (const [id, room] of tempChannels) {
-    rooms[id] = {
-      ownerId: room.ownerId,
-      min: room.min ?? 0,
-      max: room.max ?? 0,
-      panelChannelId: room.panelChannelId ?? null,
-      panelMessageId: room.panelMessageId ?? null,
-      panelIsThread: room.panelIsThread ?? false,
-    };
+    rooms[id] = { ownerId: room.ownerId, min: room.min ?? 0, max: room.max ?? 0 };
   }
   saveRooms(rooms);
-}
-
-// Deletes a room's control panel — the whole thread if it was posted as a
-// private thread, otherwise just the message. Safe to call even if the
-// thread/message/channel is already gone.
-async function deletePanelMessage(room) {
-  if (!room?.panelChannelId) return;
-  try {
-    if (room.panelIsThread) {
-      const thread = await client.channels.fetch(room.panelChannelId);
-      await thread?.delete();
-      return;
-    }
-    if (!room.panelMessageId) return;
-    const panelChannel = await client.channels.fetch(room.panelChannelId);
-    const msg = await panelChannel?.messages.fetch(room.panelMessageId);
-    await msg?.delete();
-  } catch {
-    // Thread/message/channel already gone, or bot lost access — nothing to
-    // clean up.
-  }
 }
 
 client.once('clientReady', async () => {
@@ -156,9 +131,6 @@ client.once('clientReady', async () => {
           ownerId: record.ownerId,
           min: record.min ?? 0,
           max: record.max ?? 0,
-          panelChannelId: record.panelChannelId ?? null,
-          panelMessageId: record.panelMessageId ?? null,
-          panelIsThread: record.panelIsThread ?? false,
           emptySince: channel.members.size === 0 ? Date.now() : null,
         });
       }
@@ -168,6 +140,22 @@ client.once('clientReady', async () => {
   }
   persistRooms(); // prune any that were deleted while offline
   console.log(`Adopted ${tempChannels.size} room(s) from the previous session.`);
+
+  // Make sure every category we create rooms in has its one static control
+  // panel posted in its #pengaturan channel.
+  const categoryGuilds = new Map(); // categoryId -> guild
+  if (JOIN_TO_CREATE_CHANNEL_ID) {
+    const lobby = client.channels.cache.get(JOIN_TO_CREATE_CHANNEL_ID);
+    const categoryId = CATEGORY_ID || lobby?.parentId;
+    if (lobby && categoryId) categoryGuilds.set(categoryId, lobby.guild);
+  }
+  for (const lobbyId of lobbies.keys()) {
+    const lobby = client.channels.cache.get(lobbyId);
+    if (lobby?.parentId) categoryGuilds.set(lobby.parentId, lobby.guild);
+  }
+  for (const [categoryId, guild] of categoryGuilds) {
+    await ensureSettingsPanel(guild, categoryId);
+  }
 
   // Start the periodic sweeper.
   setInterval(() => {
@@ -189,7 +177,6 @@ async function sweepRooms() {
     }
 
     if (!channel) {
-      await deletePanelMessage(room);
       tempChannels.delete(channelId);
       persistRooms();
       continue;
@@ -220,7 +207,6 @@ async function sweepRooms() {
           console.error('Failed to sweep room:', err);
         }
       }
-      await deletePanelMessage(room);
       tempChannels.delete(channelId);
       persistRooms();
     }
@@ -228,100 +214,77 @@ async function sweepRooms() {
 }
 
 /**
- * Builds the control-panel message (embed + buttons) for a room.
+ * Builds the ONE static control-panel message posted per category. It does
+ * not represent any specific room — every button resolves "the room" at
+ * click time from the voice channel the clicking member is currently
+ * connected to, so this same message works for every room in the category
+ * and never needs to be edited or reposted per room.
  */
-function buildPanel(channel, ownerId) {
-  const everyone = channel.permissionOverwrites.cache.get(channel.guild.id);
-  const isLocked = everyone?.deny.has(PermissionFlagsBits.Connect) ?? false;
-  const isHidden = everyone?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
-
+function buildPanel() {
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle(channel.name)
+    .setTitle('Room Controls')
     .setDescription(
-      `Welcome <@${ownerId}> to your voice room!\n` +
-        'Only the owner can use the buttons below to manage this room.',
-    )
-    .addFields(
-      { name: 'Owner', value: `<@${ownerId}>`, inline: true },
-      { name: 'Status', value: isLocked ? 'Locked' : 'Public', inline: true },
-      { name: 'Visibility', value: isHidden ? 'Hidden' : 'Visible', inline: true },
-      {
-        name: 'User limit',
-        value: channel.userLimit === 0 ? 'Unlimited' : String(channel.userLimit),
-        inline: true,
-      },
+      'Use the buttons below to manage the voice room **you are currently ' +
+        'connected to**. Most controls only work for the room owner. ' +
+        '**Claim** can be used by anyone in a room whose owner has left.',
     );
 
-  // Show the allowed limit range for rooms created from a configured lobby.
-  const record = tempChannels.get(channel.id);
-  if (record && (record.min > 0 || record.max > 0)) {
-    embed.addFields({
-      name: 'Allowed limit',
-      value: record.max === 0 ? `min ${record.min}` : `${record.min}-${record.max}`,
-      inline: true,
-    });
-  }
-
-  // The room's id is embedded in every customId (vc:<action>:<roomId>) so a
-  // button/modal/select still resolves to the right room even when the
-  // panel is posted in a shared settings channel instead of the room's own
-  // chat, where multiple rooms' panels can coexist.
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`vc:lock:${channel.id}`)
-      .setLabel(isLocked ? 'Unlock' : 'Lock')
-      .setEmoji(isLocked ? '🔓' : '🔒')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`vc:hide:${channel.id}`)
-      .setLabel(isHidden ? 'Unhide' : 'Hide')
-      .setEmoji(isHidden ? '👁️' : '🙈')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`vc:limit:${channel.id}`)
-      .setLabel('Limit')
-      .setEmoji('🔢')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`vc:rename:${channel.id}`)
-      .setLabel('Rename')
-      .setEmoji('✏️')
-      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:lock').setLabel('Lock / Unlock').setEmoji('🔒').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:hide').setLabel('Hide / Unhide').setEmoji('🙈').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:limit').setLabel('Limit').setEmoji('🔢').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:rename').setLabel('Rename').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
   );
 
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`vc:kick:${channel.id}`)
-      .setLabel('Kick')
-      .setEmoji('👢')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`vc:ban:${channel.id}`)
-      .setLabel('Ban')
-      .setEmoji('🔨')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`vc:permit:${channel.id}`)
-      .setLabel('Permit')
-      .setEmoji('✅')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`vc:claim:${channel.id}`)
-      .setLabel('Claim')
-      .setEmoji('👑')
-      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:kick').setLabel('Kick').setEmoji('👢').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:ban').setLabel('Ban').setEmoji('🔨').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:permit').setLabel('Permit').setEmoji('✅').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:claim').setLabel('Claim').setEmoji('👑').setStyle(ButtonStyle.Secondary),
   );
 
   const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`vc:invite:${channel.id}`)
-      .setLabel('Invite')
-      .setEmoji('🔗')
-      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:invite').setLabel('Invite').setEmoji('🔗').setStyle(ButtonStyle.Secondary),
   );
 
   return { embeds: [embed], components: [row1, row2, row3] };
+}
+
+/**
+ * Posts the static control panel in a category's #pengaturan channel if it
+ * isn't already there (checked against the last known message id, re-posting
+ * if that message was deleted). Safe to call repeatedly — a no-op once the
+ * panel exists.
+ */
+async function ensureSettingsPanel(guild, categoryId) {
+  const settingsChannel = findSettingsChannel(guild, categoryId);
+  if (!settingsChannel) {
+    console.warn(
+      `WARNING: no text channel with "pengaturan" in its name found in category ${categoryId}; ` +
+        'the control panel was not posted there.',
+    );
+    return;
+  }
+
+  const saved = config.panelMessages?.[categoryId];
+  if (saved?.channelId === settingsChannel.id) {
+    try {
+      await settingsChannel.messages.fetch(saved.messageId);
+      return; // Panel already posted and still there.
+    } catch {
+      // Message was deleted; fall through and repost it.
+    }
+  }
+
+  try {
+    const message = await settingsChannel.send(buildPanel());
+    config.panelMessages = { ...(config.panelMessages ?? {}), [categoryId]: { channelId: settingsChannel.id, messageId: message.id } };
+    saveConfig(config);
+    console.log(`Posted the static control panel in "${settingsChannel.name}" for category ${categoryId}`);
+  } catch (err) {
+    console.error(`Failed to post the control panel in category ${categoryId}:`, err);
+  }
 }
 
 /**
@@ -412,46 +375,15 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
       await member.voice.setChannel(channel);
     }
 
-    // Post the control panel in a private thread under the category's
-    // shared "pengaturan" channel, visible only to the room owner (and the
-    // bot) — so #pengaturan itself stays a clean list of threads instead of
-    // filling up with every room's panel. Falls back to the room's own
-    // built-in text chat if no "pengaturan" channel exists in the category.
-    const settingsChannel = parentId ? findSettingsChannel(guild, parentId) : null;
-    let panelChannelId = channel.id;
-    let panelMessageId = null;
-    let panelIsThread = false;
-    try {
-      if (settingsChannel) {
-        const thread = await settingsChannel.threads.create({
-          name: `${member.displayName}'s Channel`,
-          type: ChannelType.PrivateThread,
-          invitable: false,
-          reason: `Room settings thread for ${member.user.tag}`,
-        });
-        await thread.members.add(member.id);
-        const panelMessage = await thread.send(buildPanel(channel, member.id));
-        panelChannelId = thread.id;
-        panelMessageId = panelMessage.id;
-        panelIsThread = true;
-        console.log(`Posted control panel for "${channel.name}" in private thread "${thread.name}"`);
-      } else {
-        const panelMessage = await channel.send(buildPanel(channel, member.id));
-        panelMessageId = panelMessage.id;
-        console.log(`Posted control panel for "${channel.name}" in its own chat (no #pengaturan found)`);
-      }
-    } catch (err) {
-      console.error('Failed to send control panel:', err);
-    }
-
+    // No per-room panel to post: the category's one static panel (posted at
+    // startup by ensureSettingsPanel) already covers this room too, since
+    // its buttons resolve "the room" from the clicking member's current
+    // voice channel.
     tempChannels.set(channel.id, {
       ownerId: member.id,
       emptySince: null,
       min: lobbyCfg?.min ?? 0,
       max: lobbyCfg?.max ?? 0,
-      panelChannelId,
-      panelMessageId,
-      panelIsThread,
     });
     persistRooms();
 
@@ -470,10 +402,8 @@ async function deleteIfEmpty(channel) {
   if (!channel || !tempChannels.has(channel.id)) return;
   if (channel.members.size > 0) return;
 
-  const room = tempChannels.get(channel.id);
   try {
     await channel.delete('Voice room is empty, deleted automatically');
-    await deletePanelMessage(room);
     tempChannels.delete(channel.id);
     persistRooms();
     console.log(`Deleted empty room "${channel.name}"`);
@@ -488,7 +418,6 @@ async function deleteIfEmpty(channel) {
           'the bot can no longer see or manage it. A server admin must delete ' +
           'it manually in Discord.',
       );
-      await deletePanelMessage(room);
       tempChannels.delete(channel.id);
       persistRooms();
       return;
@@ -547,14 +476,15 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Resolves the room record for a room id (read from the interaction's
-// customId, e.g. "vc:lock:<roomId>"). The panel can live in a shared
-// settings channel, so the room is no longer just "the current channel".
-async function getRoom(roomId, guild) {
-  if (!roomId || !tempChannels.has(roomId)) return null;
-  const channel = await guild.channels.fetch(roomId).catch(() => null);
-  if (!channel) return null;
-  return { channel, room: tempChannels.get(roomId) };
+// Resolves "the room" for a panel interaction: the voice channel the
+// clicking member is currently connected to, if it's one of our rooms. The
+// panel is a single static message shared by every room in the category, so
+// this — not an id embedded in the component — is what ties an interaction
+// to a specific room.
+function getMemberRoom(interaction) {
+  const channel = interaction.member?.voice?.channel;
+  if (!channel || !tempChannels.has(channel.id)) return null;
+  return { channel, room: tempChannels.get(channel.id) };
 }
 
 // Dumps the channel's current permission overwrites and the change about to
@@ -620,10 +550,13 @@ async function handleSlashCommand(interaction) {
 }
 
 async function handlePanelButton(interaction) {
-  const [, action, roomId] = interaction.customId.split(':');
-  const info = await getRoom(roomId, interaction.guild);
+  const action = interaction.customId.split(':')[1];
+  const info = getMemberRoom(interaction);
   if (!info) {
-    return interaction.reply({ content: 'This room no longer exists.', ephemeral: true });
+    return interaction.reply({
+      content: "You're not currently connected to one of your rooms. Join your voice room first.",
+      ephemeral: true,
+    });
   }
   const { channel, room } = info;
   const everyoneId = channel.guild.id;
@@ -647,7 +580,7 @@ async function handlePanelButton(interaction) {
         logOverwriteFailure(channel, 'lock', err);
         throw err;
       }
-      return interaction.update(buildPanel(channel, room.ownerId));
+      return interaction.reply({ content: locked ? 'Room unlocked.' : 'Room locked.', ephemeral: true });
     }
     case 'hide': {
       const hidden =
@@ -659,7 +592,7 @@ async function handlePanelButton(interaction) {
         logOverwriteFailure(channel, 'hide', err);
         throw err;
       }
-      return interaction.update(buildPanel(channel, room.ownerId));
+      return interaction.reply({ content: hidden ? 'Room unhidden.' : 'Room hidden.', ephemeral: true });
     }
     case 'limit': {
       const min = room.min ?? 0;
@@ -672,7 +605,7 @@ async function handlePanelButton(interaction) {
       } else {
         label = `Max users (${min}-${max})`;
       }
-      const modal = new ModalBuilder().setCustomId(`vc:limitModal:${channel.id}`).setTitle('Set user limit');
+      const modal = new ModalBuilder().setCustomId('vc:limitModal').setTitle('Set user limit');
       const input = new TextInputBuilder()
         .setCustomId('value')
         .setLabel(label)
@@ -682,7 +615,7 @@ async function handlePanelButton(interaction) {
       return interaction.showModal(modal);
     }
     case 'rename': {
-      const modal = new ModalBuilder().setCustomId(`vc:renameModal:${channel.id}`).setTitle('Rename room');
+      const modal = new ModalBuilder().setCustomId('vc:renameModal').setTitle('Rename room');
       const input = new TextInputBuilder()
         .setCustomId('value')
         .setLabel('New room name')
@@ -705,7 +638,7 @@ async function handlePanelButton(interaction) {
         .first(25)
         .map((m) => ({ label: m.displayName, value: m.id }));
       const select = new StringSelectMenuBuilder()
-        .setCustomId(`vc:kickSelect:${channel.id}`)
+        .setCustomId('vc:kickSelect')
         .setPlaceholder('Select a member in this room to disconnect')
         .setMaxValues(1)
         .addOptions(options);
@@ -717,7 +650,7 @@ async function handlePanelButton(interaction) {
     }
     case 'ban': {
       const select = new UserSelectMenuBuilder()
-        .setCustomId(`vc:banSelect:${channel.id}`)
+        .setCustomId('vc:banSelect')
         .setPlaceholder('Select a user to ban from this room')
         .setMaxValues(1);
       return interaction.reply({
@@ -728,7 +661,7 @@ async function handlePanelButton(interaction) {
     }
     case 'permit': {
       const select = new UserSelectMenuBuilder()
-        .setCustomId(`vc:permitSelect:${channel.id}`)
+        .setCustomId('vc:permitSelect')
         .setPlaceholder('Select a user to permit')
         .setMaxValues(1);
       return interaction.reply({
@@ -752,7 +685,7 @@ async function handlePanelButton(interaction) {
         MuteMembers: true,
         Connect: true,
       });
-      return interaction.update(buildPanel(channel, room.ownerId));
+      return interaction.reply({ content: 'You are now the owner of this room.', ephemeral: true });
     }
     case 'invite': {
       const invite = await channel.createInvite({ maxAge: 3600, maxUses: 0 });
@@ -767,10 +700,12 @@ async function handlePanelButton(interaction) {
 }
 
 async function handlePanelModal(interaction) {
-  const [, modalName, roomId] = interaction.customId.split(':');
-  const info = await getRoom(roomId, interaction.guild);
+  const info = getMemberRoom(interaction);
   if (!info) {
-    return interaction.reply({ content: 'This room no longer exists.', ephemeral: true });
+    return interaction.reply({
+      content: "You're not currently connected to one of your rooms. Join your voice room first.",
+      ephemeral: true,
+    });
   }
   const { channel, room } = info;
   if (interaction.user.id !== room.ownerId) {
@@ -778,7 +713,7 @@ async function handlePanelModal(interaction) {
   }
   const value = interaction.fields.getTextInputValue('value').trim();
 
-  if (modalName === 'limitModal') {
+  if (interaction.customId === 'vc:limitModal') {
     const n = Number.parseInt(value, 10);
     if (Number.isNaN(n) || n < 0 || n > 99) {
       return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
@@ -799,29 +734,25 @@ async function handlePanelModal(interaction) {
       });
     }
     await channel.setUserLimit(n);
-    if (interaction.message) {
-      await interaction.message.edit(buildPanel(channel, room.ownerId)).catch(() => {});
-    }
     return interaction.reply({
       content: `User limit set to ${n === 0 ? 'unlimited' : n}.`,
       ephemeral: true,
     });
   }
 
-  if (modalName === 'renameModal') {
+  if (interaction.customId === 'vc:renameModal') {
     await channel.setName(value);
-    if (interaction.message) {
-      await interaction.message.edit(buildPanel(channel, room.ownerId)).catch(() => {});
-    }
     return interaction.reply({ content: `Room renamed to "${value}".`, ephemeral: true });
   }
 }
 
 async function handlePanelSelect(interaction) {
-  const [, selectName, roomId] = interaction.customId.split(':');
-  const info = await getRoom(roomId, interaction.guild);
+  const info = getMemberRoom(interaction);
   if (!info) {
-    return interaction.update({ content: 'This room no longer exists.', components: [] });
+    return interaction.update({
+      content: "You're not currently connected to one of your rooms.",
+      components: [],
+    });
   }
   const { channel, room } = info;
   if (interaction.user.id !== room.ownerId) {
@@ -829,7 +760,7 @@ async function handlePanelSelect(interaction) {
   }
   const targetId = interaction.values[0];
 
-  if (selectName === 'kickSelect') {
+  if (interaction.customId === 'vc:kickSelect') {
     const member = await channel.guild.members.fetch(targetId).catch(() => null);
     if (member?.voice?.channelId === channel.id) {
       await member.voice.disconnect('Removed by room owner');
@@ -838,7 +769,7 @@ async function handlePanelSelect(interaction) {
     return interaction.update({ content: 'That user is no longer in this room.', components: [] });
   }
 
-  if (selectName === 'banSelect') {
+  if (interaction.customId === 'vc:banSelect') {
     if (targetId === room.ownerId) {
       return interaction.update({ content: 'You cannot ban yourself.', components: [] });
     }
@@ -864,7 +795,7 @@ async function handlePanelSelect(interaction) {
     });
   }
 
-  if (selectName === 'permitSelect') {
+  if (interaction.customId === 'vc:permitSelect') {
     // Also clears a ban (re-allows Connect + ViewChannel).
     await channel.permissionOverwrites.edit(targetId, { Connect: true, ViewChannel: true });
     return interaction.update({ content: `Permitted <@${targetId}> to join this room.`, components: [] });
