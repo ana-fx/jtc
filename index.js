@@ -65,18 +65,39 @@ const client = new Client({
   ],
 });
 
-// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max }>.
-// emptySince is a timestamp (ms) since the room became empty, or null.
-// min/max define the allowed user-limit range (0 max = no upper bound).
+// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max,
+// panelChannelId, panelMessageId }>. emptySince is a timestamp (ms) since
+// the room became empty, or null. min/max define the allowed user-limit
+// range (0 max = no upper bound). panelChannelId/panelMessageId locate the
+// control panel message so it can be deleted along with the room.
 const tempChannels = new Map();
 
 // Writes the current room list to disk so it survives a restart.
 function persistRooms() {
   const rooms = {};
   for (const [id, room] of tempChannels) {
-    rooms[id] = { ownerId: room.ownerId, min: room.min ?? 0, max: room.max ?? 0 };
+    rooms[id] = {
+      ownerId: room.ownerId,
+      min: room.min ?? 0,
+      max: room.max ?? 0,
+      panelChannelId: room.panelChannelId ?? null,
+      panelMessageId: room.panelMessageId ?? null,
+    };
   }
   saveRooms(rooms);
+}
+
+// Deletes a room's control panel message, if we know where it is. Safe to
+// call even if the message/channel is already gone.
+async function deletePanelMessage(room) {
+  if (!room?.panelChannelId || !room.panelMessageId) return;
+  try {
+    const panelChannel = await client.channels.fetch(room.panelChannelId);
+    const msg = await panelChannel?.messages.fetch(room.panelMessageId);
+    await msg?.delete();
+  } catch {
+    // Message/channel already gone, or bot lost access — nothing to clean up.
+  }
 }
 
 client.once('clientReady', async () => {
@@ -125,6 +146,8 @@ client.once('clientReady', async () => {
           ownerId: record.ownerId,
           min: record.min ?? 0,
           max: record.max ?? 0,
+          panelChannelId: record.panelChannelId ?? null,
+          panelMessageId: record.panelMessageId ?? null,
           emptySince: channel.members.size === 0 ? Date.now() : null,
         });
       }
@@ -155,6 +178,7 @@ async function sweepRooms() {
     }
 
     if (!channel) {
+      await deletePanelMessage(room);
       tempChannels.delete(channelId);
       persistRooms();
       continue;
@@ -185,6 +209,7 @@ async function sweepRooms() {
           console.error('Failed to sweep room:', err);
         }
       }
+      await deletePanelMessage(room);
       tempChannels.delete(channelId);
       persistRooms();
     }
@@ -371,14 +396,6 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
       console.error(`Failed to grant the bot its own overwrite on "${channel.name}":`, err);
     }
 
-    tempChannels.set(channel.id, {
-      ownerId: member.id,
-      emptySince: null,
-      min: lobbyCfg?.min ?? 0,
-      max: lobbyCfg?.max ?? 0,
-    });
-    persistRooms();
-
     // Move the member into the new room (if still connected to voice).
     if (member.voice.channel) {
       await member.voice.setChannel(channel);
@@ -386,14 +403,28 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
 
     // Post the control panel in the category's shared "pengaturan" channel
     // if one exists, falling back to the room's own built-in text chat.
+    // The message is tracked so it can be cleaned up when the room is
+    // deleted — otherwise dead panels (with buttons pointing at a room that
+    // no longer exists) would pile up in the shared channel over time.
     const settingsChannel = parentId ? findSettingsChannel(guild, parentId) : null;
     const panelTarget = settingsChannel ?? channel;
+    let panelMessage = null;
     try {
-      await panelTarget.send(buildPanel(channel, member.id));
+      panelMessage = await panelTarget.send(buildPanel(channel, member.id));
       console.log(`Posted control panel for "${channel.name}" in "${panelTarget.name}"`);
     } catch (err) {
       console.error('Failed to send control panel:', err);
     }
+
+    tempChannels.set(channel.id, {
+      ownerId: member.id,
+      emptySince: null,
+      min: lobbyCfg?.min ?? 0,
+      max: lobbyCfg?.max ?? 0,
+      panelChannelId: panelTarget.id,
+      panelMessageId: panelMessage?.id ?? null,
+    });
+    persistRooms();
 
     console.log(`Created room "${channel.name}" for ${member.user.tag}`);
     return channel;
@@ -410,8 +441,10 @@ async function deleteIfEmpty(channel) {
   if (!channel || !tempChannels.has(channel.id)) return;
   if (channel.members.size > 0) return;
 
+  const room = tempChannels.get(channel.id);
   try {
     await channel.delete('Voice room is empty, deleted automatically');
+    await deletePanelMessage(room);
     tempChannels.delete(channel.id);
     persistRooms();
     console.log(`Deleted empty room "${channel.name}"`);
@@ -426,6 +459,7 @@ async function deleteIfEmpty(channel) {
           'the bot can no longer see or manage it. A server admin must delete ' +
           'it manually in Discord.',
       );
+      await deletePanelMessage(room);
       tempChannels.delete(channel.id);
       persistRooms();
       return;
