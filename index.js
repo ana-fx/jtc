@@ -296,6 +296,11 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
     ? lobbyChannel.parentId || null
     : CATEGORY_ID || lobbyChannel.parentId || null;
 
+  console.log(
+    `createRoomFor: member=${member.user.tag} lobby="${lobbyChannel.name}" ` +
+      `(${lobbyChannel.id}) parentCategory=${parentId ?? '(none)'}`,
+  );
+
   try {
     const channel = await guild.channels.create({
       name: `${member.displayName}'s Channel`,
@@ -434,6 +439,26 @@ function getRoom(interaction) {
   return { channel, room: tempChannels.get(channel.id) };
 }
 
+// Dumps the channel's current permission overwrites and the change about to
+// be attempted, so a subsequent failure can be diagnosed from logs alone.
+function logOverwriteAttempt(channel, action, change) {
+  const entries = [...channel.permissionOverwrites.cache.values()].map(
+    (o) => `[type=${o.type} id=${o.id} allow=${o.allow.bitfield} deny=${o.deny.bitfield}]`,
+  );
+  console.log(
+    `${action}: channel="${channel.name}" (${channel.id}) parent=${channel.parentId ?? '(none)'} ` +
+      `botId=${client.user.id} change=${JSON.stringify(change)} ` +
+      `currentOverwrites=${entries.join(' ') || '(none)'}`,
+  );
+}
+
+function logOverwriteFailure(channel, action, err) {
+  console.error(
+    `${action} FAILED on channel="${channel.name}" (${channel.id}) parent=${channel.parentId ?? '(none)'}: ` +
+      `code=${err?.code} status=${err?.status} message=${err?.rawError?.message ?? err?.message}`,
+  );
+}
+
 async function handleSlashCommand(interaction) {
   console.log(
     `interaction: /${interaction.commandName} from ${interaction.user.tag} ` +
@@ -497,13 +522,25 @@ async function handlePanelButton(interaction) {
     case 'lock': {
       const locked =
         channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.Connect) ?? false;
-      await channel.permissionOverwrites.edit(everyoneId, { Connect: locked ? null : false });
+      logOverwriteAttempt(channel, 'lock', { Connect: locked ? null : false });
+      try {
+        await channel.permissionOverwrites.edit(everyoneId, { Connect: locked ? null : false });
+      } catch (err) {
+        logOverwriteFailure(channel, 'lock', err);
+        throw err;
+      }
       return interaction.update(buildPanel(channel, room.ownerId));
     }
     case 'hide': {
       const hidden =
         channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
-      await channel.permissionOverwrites.edit(everyoneId, { ViewChannel: hidden ? null : false });
+      logOverwriteAttempt(channel, 'hide', { ViewChannel: hidden ? null : false });
+      try {
+        await channel.permissionOverwrites.edit(everyoneId, { ViewChannel: hidden ? null : false });
+      } catch (err) {
+        logOverwriteFailure(channel, 'hide', err);
+        throw err;
+      }
       return interaction.update(buildPanel(channel, room.ownerId));
     }
     case 'limit': {
