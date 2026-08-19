@@ -66,10 +66,11 @@ const client = new Client({
 });
 
 // Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max,
-// panelChannelId, panelMessageId }>. emptySince is a timestamp (ms) since
-// the room became empty, or null. min/max define the allowed user-limit
-// range (0 max = no upper bound). panelChannelId/panelMessageId locate the
-// control panel message so it can be deleted along with the room.
+// panelChannelId, panelMessageId, panelIsThread }>. emptySince is a
+// timestamp (ms) since the room became empty, or null. min/max define the
+// allowed user-limit range (0 max = no upper bound). panelChannelId/
+// panelMessageId locate the control panel; panelIsThread marks it as a
+// private thread (deleted whole) rather than a plain message.
 const tempChannels = new Map();
 
 // Writes the current room list to disk so it survives a restart.
@@ -82,21 +83,30 @@ function persistRooms() {
       max: room.max ?? 0,
       panelChannelId: room.panelChannelId ?? null,
       panelMessageId: room.panelMessageId ?? null,
+      panelIsThread: room.panelIsThread ?? false,
     };
   }
   saveRooms(rooms);
 }
 
-// Deletes a room's control panel message, if we know where it is. Safe to
-// call even if the message/channel is already gone.
+// Deletes a room's control panel — the whole thread if it was posted as a
+// private thread, otherwise just the message. Safe to call even if the
+// thread/message/channel is already gone.
 async function deletePanelMessage(room) {
-  if (!room?.panelChannelId || !room.panelMessageId) return;
+  if (!room?.panelChannelId) return;
   try {
+    if (room.panelIsThread) {
+      const thread = await client.channels.fetch(room.panelChannelId);
+      await thread?.delete();
+      return;
+    }
+    if (!room.panelMessageId) return;
     const panelChannel = await client.channels.fetch(room.panelChannelId);
     const msg = await panelChannel?.messages.fetch(room.panelMessageId);
     await msg?.delete();
   } catch {
-    // Message/channel already gone, or bot lost access — nothing to clean up.
+    // Thread/message/channel already gone, or bot lost access — nothing to
+    // clean up.
   }
 }
 
@@ -148,6 +158,7 @@ client.once('clientReady', async () => {
           max: record.max ?? 0,
           panelChannelId: record.panelChannelId ?? null,
           panelMessageId: record.panelMessageId ?? null,
+          panelIsThread: record.panelIsThread ?? false,
           emptySince: channel.members.size === 0 ? Date.now() : null,
         });
       }
@@ -401,17 +412,34 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
       await member.voice.setChannel(channel);
     }
 
-    // Post the control panel in the category's shared "pengaturan" channel
-    // if one exists, falling back to the room's own built-in text chat.
-    // The message is tracked so it can be cleaned up when the room is
-    // deleted — otherwise dead panels (with buttons pointing at a room that
-    // no longer exists) would pile up in the shared channel over time.
+    // Post the control panel in a private thread under the category's
+    // shared "pengaturan" channel, visible only to the room owner (and the
+    // bot) — so #pengaturan itself stays a clean list of threads instead of
+    // filling up with every room's panel. Falls back to the room's own
+    // built-in text chat if no "pengaturan" channel exists in the category.
     const settingsChannel = parentId ? findSettingsChannel(guild, parentId) : null;
-    const panelTarget = settingsChannel ?? channel;
-    let panelMessage = null;
+    let panelChannelId = channel.id;
+    let panelMessageId = null;
+    let panelIsThread = false;
     try {
-      panelMessage = await panelTarget.send(buildPanel(channel, member.id));
-      console.log(`Posted control panel for "${channel.name}" in "${panelTarget.name}"`);
+      if (settingsChannel) {
+        const thread = await settingsChannel.threads.create({
+          name: `${member.displayName}'s Channel`,
+          type: ChannelType.PrivateThread,
+          invitable: false,
+          reason: `Room settings thread for ${member.user.tag}`,
+        });
+        await thread.members.add(member.id);
+        const panelMessage = await thread.send(buildPanel(channel, member.id));
+        panelChannelId = thread.id;
+        panelMessageId = panelMessage.id;
+        panelIsThread = true;
+        console.log(`Posted control panel for "${channel.name}" in private thread "${thread.name}"`);
+      } else {
+        const panelMessage = await channel.send(buildPanel(channel, member.id));
+        panelMessageId = panelMessage.id;
+        console.log(`Posted control panel for "${channel.name}" in its own chat (no #pengaturan found)`);
+      }
     } catch (err) {
       console.error('Failed to send control panel:', err);
     }
@@ -421,8 +449,9 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
       emptySince: null,
       min: lobbyCfg?.min ?? 0,
       max: lobbyCfg?.max ?? 0,
-      panelChannelId: panelTarget.id,
-      panelMessageId: panelMessage?.id ?? null,
+      panelChannelId,
+      panelMessageId,
+      panelIsThread,
     });
     persistRooms();
 

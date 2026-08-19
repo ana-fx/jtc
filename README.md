@@ -74,7 +74,7 @@ When you see `Logged in as ...`, the bot is active. Try joining the lobby channe
 ## How It Works
 
 - **`index.js`** — listens for the `voiceStateUpdate` event. When someone joins the lobby, the bot creates a new channel and moves them into it. When a bot-created channel becomes empty, it is deleted.
-- **Control panel location** — the room's control panel (Lock, Hide, Limit, etc.) is posted in the category's text channel whose name contains "pengaturan", if one exists; otherwise it falls back to the room's own built-in text chat. Each button embeds the room's channel id in its customId (`vc:<action>:<roomId>`), so this still works correctly even with several rooms' panels posted in the same shared channel.
+- **Control panel location** — the room's control panel (Lock, Hide, Limit, etc.) is posted in a **private thread** under the category's text channel whose name contains "pengaturan" (visible only to the room owner and the bot), if such a channel exists; otherwise it falls back to a plain message in the room's own built-in text chat. Each button embeds the room's channel id in its customId (`vc:<action>:<roomId>`), so this still resolves the correct room even with several rooms' threads living under the same shared channel. The thread is deleted when the room is deleted. This requires the bot to have the **Create Private Threads** and **Send Messages in Threads** permissions (in addition to the other permissions listed above).
 - Rooms are tracked only while the bot is running. **If the bot restarts**, previously created rooms are no longer tracked (and won't be auto-deleted). For permanent tracking, this would need a database (can be added later).
 
 ## Deployment
