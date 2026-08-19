@@ -324,23 +324,26 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
     });
 
     // Explicitly grant the bot itself access on this specific channel, as a
-    // separate follow-up edit (combining it into the create call above made
-    // Discord reject the whole creation with 50013, even in categories where
-    // the bot already had every permission being granted). Without this,
-    // an @everyone deny added later (e.g. via the Hide button) can override
-    // the bot's category-level allow — Discord processes category overwrites
-    // before the channel's own, so a channel-level @everyone deny wins over
-    // a category-level role allow for any entity (including the bot) that
-    // has no overwrite of its own directly on the channel.
+    // separate follow-up edit. Without this, an @everyone deny added later
+    // (e.g. via the Hide button) can override the bot's category-level
+    // allow — Discord processes category overwrites before the channel's
+    // own, so a channel-level @everyone deny wins over a category-level
+    // role allow for any entity (including the bot) that has no overwrite
+    // of its own directly on the channel.
+    //
+    // Deliberately NOT including ManageRoles or CreateInstantInvite here:
+    // Discord rejects (50013) granting those two via an overwrite unless the
+    // granter has Administrator, even when it already holds them through its
+    // base role. Both are already covered by the bot's base role permissions
+    // (guild-wide), so omitting them from the channel-specific overwrite
+    // loses no capability.
     try {
       await channel.permissionOverwrites.edit(client.user.id, {
         ViewChannel: true,
         ManageChannels: true,
-        ManageRoles: true,
         MoveMembers: true,
         MuteMembers: true,
         Connect: true,
-        CreateInstantInvite: true,
       });
     } catch (err) {
       console.error(`Failed to grant the bot its own overwrite on "${channel.name}":`, err);
