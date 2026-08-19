@@ -176,7 +176,14 @@ async function sweepRooms() {
         await channel.delete('Empty for more than 5 minutes');
         console.log(`Swept empty room "${channel.name}"`);
       } catch (err) {
-        console.error('Failed to sweep room:', err);
+        if (err?.code === 50001) {
+          console.warn(
+            `WARNING: lost access to room "${channel.name}" (id: ${channel.id}) — ` +
+              'a server admin must delete it manually in Discord.',
+          );
+        } else {
+          console.error('Failed to sweep room:', err);
+        }
       }
       tempChannels.delete(channelId);
       persistRooms();
@@ -352,6 +359,20 @@ async function deleteIfEmpty(channel) {
     persistRooms();
     console.log(`Deleted empty room "${channel.name}"`);
   } catch (err) {
+    // 50001 (Missing Access) means the bot itself lost visibility into this
+    // channel — usually a stray permission overwrite denying it View Channel
+    // (e.g. it was accidentally targeted by Ban). The bot can never recover
+    // access on its own, so stop retrying and flag it for manual deletion.
+    if (err?.code === 50001) {
+      console.warn(
+        `WARNING: lost access to room "${channel.name}" (id: ${channel.id}) — ` +
+          'the bot can no longer see or manage it. A server admin must delete ' +
+          'it manually in Discord.',
+      );
+      tempChannels.delete(channel.id);
+      persistRooms();
+      return;
+    }
     console.error('Failed to delete room:', err);
   }
 }
@@ -664,12 +685,21 @@ async function handlePanelSelect(interaction) {
     if (targetId === room.ownerId) {
       return interaction.update({ content: 'You cannot ban yourself.', components: [] });
     }
+    if (targetId === client.user.id) {
+      return interaction.update({
+        content: 'You cannot ban the bot — that would lock it out of managing this room.',
+        components: [],
+      });
+    }
+    const targetMember = await channel.guild.members.fetch(targetId).catch(() => null);
+    if (targetMember?.user.bot) {
+      return interaction.update({ content: 'You cannot ban a bot from this room.', components: [] });
+    }
     // Block the user from connecting to / seeing this room.
     await channel.permissionOverwrites.edit(targetId, { Connect: false, ViewChannel: false });
     // If they are currently inside, disconnect them too.
-    const member = await channel.guild.members.fetch(targetId).catch(() => null);
-    if (member?.voice?.channelId === channel.id) {
-      await member.voice.disconnect('Banned by room owner').catch(() => {});
+    if (targetMember?.voice?.channelId === channel.id) {
+      await targetMember.voice.disconnect('Banned by room owner').catch(() => {});
     }
     return interaction.update({
       content: `Banned <@${targetId}> from this room. Use Permit to undo.`,
