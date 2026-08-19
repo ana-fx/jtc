@@ -280,8 +280,8 @@ function buildPanel(channel, ownerId) {
 /**
  * Creates a new voice room for a member and moves them into it.
  * When lobbyCfg is set (a configured limit lobby), the room starts at the
- * lobby's minimum limit, is named after the lobby, and stays in the lobby's
- * own category so each room type groups under its lobby.
+ * lobby's minimum limit and stays in the lobby's own category so each room
+ * type groups under its lobby.
  */
 async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
   const guild = member.guild;
@@ -291,9 +291,7 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
 
   try {
     const channel = await guild.channels.create({
-      name: lobbyCfg
-        ? `${lobbyChannel.name} - ${member.displayName}`
-        : `${member.displayName}'s Room`,
+      name: `${member.displayName}'s Channel`,
       type: ChannelType.GuildVoice,
       parent: parentId,
       // Configured lobbies start at their minimum; otherwise the global
