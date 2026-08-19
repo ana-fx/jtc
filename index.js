@@ -320,6 +320,25 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
             PermissionFlagsBits.Connect,
           ],
         },
+        {
+          // Explicitly grant the bot itself access on this specific channel.
+          // Without this, an @everyone deny added later (e.g. via the Hide
+          // button) can override the bot's category-level allow — Discord
+          // processes category overwrites before the channel's own, so a
+          // channel-level @everyone deny wins over a category-level role
+          // allow for any entity (including the bot) that has no overwrite
+          // of its own directly on the channel.
+          id: client.user.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.ManageChannels,
+            PermissionFlagsBits.ManageRoles,
+            PermissionFlagsBits.MoveMembers,
+            PermissionFlagsBits.MuteMembers,
+            PermissionFlagsBits.Connect,
+            PermissionFlagsBits.CreateInstantInvite,
+          ],
+        },
       ],
     });
 
