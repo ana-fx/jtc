@@ -76,6 +76,10 @@ const client = new Client({
 // to — not by an id baked into the component.
 const tempChannels = new Map();
 
+// categoryId -> guild, for every category we create rooms in. Populated once
+// in clientReady and reused by the periodic panel self-heal check.
+const categoryGuilds = new Map();
+
 // Writes the current room list to disk so it survives a restart.
 function persistRooms() {
   const rooms = {};
@@ -141,9 +145,11 @@ client.once('clientReady', async () => {
   persistRooms(); // prune any that were deleted while offline
   console.log(`Adopted ${tempChannels.size} room(s) from the previous session.`);
 
-  // Make sure every category we create rooms in has its one static control
-  // panel posted in its #pengaturan channel.
-  const categoryGuilds = new Map(); // categoryId -> guild
+  // Every category we create rooms in needs its one static control panel in
+  // its #pengaturan channel. Computed once here (channels don't change
+  // category at runtime) and reused by the periodic re-check below, so a
+  // panel someone deletes by hand gets reposted within a minute instead of
+  // needing a bot restart.
   if (JOIN_TO_CREATE_CHANNEL_ID) {
     const lobby = client.channels.cache.get(JOIN_TO_CREATE_CHANNEL_ID);
     const categoryId = CATEGORY_ID || lobby?.parentId;
@@ -157,9 +163,14 @@ client.once('clientReady', async () => {
     await ensureSettingsPanel(guild, categoryId);
   }
 
-  // Start the periodic sweeper.
+  // Start the periodic sweeper (empty-room cleanup + panel self-heal).
   setInterval(() => {
     sweepRooms().catch((err) => console.error('Sweep error:', err));
+    for (const [categoryId, guild] of categoryGuilds) {
+      ensureSettingsPanel(guild, categoryId).catch((err) =>
+        console.error(`Panel re-check failed for category ${categoryId}:`, err),
+      );
+    }
   }, SWEEP_INTERVAL_MS);
 });
 
