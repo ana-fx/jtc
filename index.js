@@ -250,13 +250,11 @@ async function sweepRooms() {
 }
 
 /**
- * Builds the ONE static message posted per category: a "Manage a Room"
- * button, plus (if any bounded lobbies live in this category) a "choose
- * your room size" select menu per lobby. It does not represent any specific
- * room — clicking "Manage a Room" lists the category's currently active
- * rooms (see handleManageRoomButton); picking one from that list is what
- * reveals the actual per-room controls, so this message never needs to be
- * edited or reposted as rooms come and go.
+ * Builds the ONE static message posted per category: one "choose your room
+ * size" select menu per bounded lobby living in that category. There is no
+ * general "Room Controls" section anymore — a room's Lock/Hide/Limit/etc
+ * controls are shown immediately when it's created (see createRoomFor /
+ * handleCreatePick), so this message only needs to cover room creation.
  *
  * A bounded lobby's select menu embeds its channel id in the customId
  * (vc:createPick:<lobbyChannelId>) since it can't be inferred from the
@@ -265,23 +263,8 @@ async function sweepRooms() {
  * one bounded lobby's picker.
  */
 function buildPanel(boundedLobbiesInCategory = []) {
-  const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle('Room Controls')
-    .setDescription(
-      'Click **Manage a Room** to pick one of the currently active rooms ' +
-        'in this category and get its controls (Lock, Hide, Limit, Rename, ' +
-        'Kick, Ban, Permit, Claim, Invite). Most controls only work for the ' +
-        "room's owner. **Claim** can be used by anyone on a room whose " +
-        'owner has left.',
-    );
-
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('vc:manageRoom').setLabel('Manage a Room').setEmoji('🎛️').setStyle(ButtonStyle.Primary),
-  );
-
-  const embeds = [embed];
-  const components = [row1];
+  const embeds = [];
+  const components = [];
 
   for (const { channel: lobbyChannel, lobbyCfg } of boundedLobbiesInCategory) {
     embeds.push(
@@ -372,12 +355,15 @@ function buildRoomControls(channel, room) {
 }
 
 /**
- * Posts the one combined panel (control buttons + any bounded lobbies'
- * create-size pickers) in a category's #pengaturan channel if it isn't
- * already there, re-posting if that message was deleted. Safe to call
+ * Posts the combined panel (currently: just the bounded lobbies' create-size
+ * pickers, if any) in a category's #pengaturan channel if it isn't already
+ * there, re-posting if that message was deleted. A category with no bounded
+ * lobbies has nothing to show, so this is a no-op for it. Safe to call
  * repeatedly — a no-op once the panel exists.
  */
 async function ensurePanel(guild, categoryId, boundedLobbiesInCategory = []) {
+  if (boundedLobbiesInCategory.length === 0) return;
+
   const settingsChannel = findSettingsChannel(guild, categoryId);
   if (!settingsChannel) {
     console.warn(
@@ -602,9 +588,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
-    if (interaction.isButton() && interaction.customId === 'vc:manageRoom') {
-      return await handleManageRoomButton(interaction);
-    }
     if (interaction.isButton() && interaction.customId.startsWith('vc:')) {
       return await handlePanelButton(interaction);
     }
@@ -613,9 +596,6 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith('vc:createPick:')) {
       return await handleCreatePick(interaction);
-    }
-    if (interaction.isStringSelectMenu() && interaction.customId === 'vc:manageRoomSelect') {
-      return await handleManageRoomSelect(interaction);
     }
     if (
       (interaction.isUserSelectMenu() || interaction.isStringSelectMenu()) &&
@@ -646,44 +626,6 @@ async function resolveRoomById(roomId, guild) {
   const channel = await guild.channels.fetch(roomId).catch(() => null);
   if (!channel) return null;
   return { channel, room: tempChannels.get(roomId) };
-}
-
-/**
- * Handles the "Manage a Room" button: lists every currently active room in
- * this category (derived from the #pengaturan channel's own category) as a
- * select menu, so the member can pick which one to get controls for.
- */
-async function handleManageRoomButton(interaction) {
-  const categoryId = interaction.channel?.parentId;
-  const roomsInCategory = [...tempChannels.entries()].filter(([, room]) => room.categoryId === categoryId);
-  if (roomsInCategory.length === 0) {
-    return interaction.reply({ content: 'There are no active rooms in this category right now.', ephemeral: true });
-  }
-  const options = roomsInCategory
-    .slice(-25)
-    .map(([id, room]) => ({ label: room.name ?? 'Room', value: id }));
-  const select = new StringSelectMenuBuilder()
-    .setCustomId('vc:manageRoomSelect')
-    .setPlaceholder('Select a room to manage')
-    .addOptions(options);
-  return interaction.reply({
-    content: 'Choose which room to manage:',
-    components: [new ActionRowBuilder().addComponents(select)],
-    ephemeral: true,
-  });
-}
-
-/**
- * Handles picking a room from the "Manage a Room" list: replaces the
- * ephemeral message with that room's status embed and control buttons.
- */
-async function handleManageRoomSelect(interaction) {
-  const roomId = interaction.values[0];
-  const info = await resolveRoomById(roomId, interaction.guild);
-  if (!info) {
-    return interaction.update({ content: 'That room no longer exists.', embeds: [], components: [] });
-  }
-  return interaction.update(buildRoomControls(info.channel, info.room));
 }
 
 // Dumps the channel's current permission overwrites and the change about to
