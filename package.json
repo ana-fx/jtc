@@ -1,7 +1,7 @@
 {
-  "name": "jtc-voice-bot",
+  "name": "olaf-bot",
   "version": "1.0.0",
-  "description": "Discord bot untuk membuat voice room otomatis (Join to Create)",
+  "description": "Discord game-room + leveling/economy bot",
   "main": "index.js",
   "type": "module",
   "scripts": {

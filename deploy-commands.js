@@ -1,14 +1,8 @@
 import 'dotenv/config';
-import {
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  PermissionFlagsBits,
-} from 'discord.js';
+import { REST, Routes, SlashCommandBuilder } from 'discord.js';
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
 
-// Diagnostics: show which config values are loaded (token is masked).
 console.log('--- deploy-commands diagnostics ---');
 console.log('DISCORD_TOKEN :', DISCORD_TOKEN ? `present (ends ...${DISCORD_TOKEN.slice(-6)})` : 'MISSING');
 console.log('CLIENT_ID     :', CLIENT_ID || 'MISSING');
@@ -21,46 +15,31 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
 }
 
 const commands = [
+  new SlashCommandBuilder().setName('wh').setDescription('Go hunting for coins (has a cooldown)').toJSON(),
+  new SlashCommandBuilder().setName('wb').setDescription('Go into battle for coins (has a cooldown)').toJSON(),
   new SlashCommandBuilder()
-    .setName('voice')
-    .setDescription('Create a private voice room and move into it')
+    .setName('balance')
+    .setDescription('Check your (or someone else\'s) coin balance')
+    .addUserOption((opt) => opt.setName('user').setDescription('Whose balance to check'))
     .toJSON(),
   new SlashCommandBuilder()
-    .setName('setlimit')
-    .setDescription('Set the max users for new voice rooms (0 = unlimited)')
-    .addIntegerOption((option) =>
-      option
-        .setName('count')
-        .setDescription('Maximum users per room (0-99, 0 = unlimited)')
-        .setMinValue(0)
-        .setMaxValue(99)
-        .setRequired(true),
-    )
-    // Only members with Manage Channels see/use this command by default.
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    .setName('level')
+    .setDescription('Check your (or someone else\'s) level and XP')
+    .addUserOption((opt) => opt.setName('user').setDescription('Whose level to check'))
     .toJSON(),
 ];
-
-console.log(
-  `Preparing ${commands.length} command(s): ` +
-    commands.map((c) => `/${c.name}`).join(', '),
-);
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 try {
   console.log(`Registering guild commands for app ${CLIENT_ID} on guild ${GUILD_ID}...`);
-  const data = await rest.put(
-    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-    { body: commands },
-  );
+  const data = await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
   console.log(`SUCCESS: ${data.length} command(s) now registered on this guild:`);
   for (const cmd of data) {
     console.log(`  - /${cmd.name} (id: ${cmd.id})`);
   }
 } catch (err) {
   console.error('FAILED to register commands.');
-  // Surface the specific Discord/HTTP details so the exact cause is visible.
   if (err?.status) console.error('HTTP status   :', err.status);
   if (err?.code) console.error('Discord code  :', err.code);
   if (err?.rawError) console.error('Discord body  :', JSON.stringify(err.rawError, null, 2));

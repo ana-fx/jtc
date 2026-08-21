@@ -3,594 +3,403 @@ import {
   Client,
   GatewayIntentBits,
   ChannelType,
-  PermissionFlagsBits,
   EmbedBuilder,
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  UserSelectMenuBuilder,
   StringSelectMenuBuilder,
 } from 'discord.js';
 import { loadConfig, saveConfig } from './config.js';
-import { loadRooms, saveRooms } from './rooms.js';
+import { getUser, saveUsers } from './store.js';
+import { addXp, xpToNextLevel } from './leveling.js';
 
-const {
-  DISCORD_TOKEN,
-  JOIN_TO_CREATE_CHANNEL_ID,
-  CATEGORY_ID,
-} = process.env;
-
-// Persistent settings (e.g. default user limit for new rooms).
-const config = loadConfig();
-
-// How long a room may stay empty before the sweeper deletes it.
-const EMPTY_GRACE_MS = 5 * 60 * 1000; // 5 minutes
-// How often the sweeper runs.
-const SWEEP_INTERVAL_MS = 60 * 1000; // 1 minute
+const { DISCORD_TOKEN, GAME_LOBBY_CHANNEL_ID, GAMES } = process.env;
 
 if (!DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is not set in the .env file');
   process.exit(1);
 }
+if (!GAME_LOBBY_CHANNEL_ID) {
+  console.error('GAME_LOBBY_CHANNEL_ID is not set in the .env file');
+  process.exit(1);
+}
+
+// Comma-separated list of games offered in the room-creation picker, e.g.
+// "Mobile Legends,PUBG,Valorant,Free Fire".
+const games = (GAMES || 'Mobile Legends,PUBG,Valorant,Free Fire,Genshin Impact')
+  .split(',')
+  .map((g) => g.trim())
+  .filter(Boolean);
+
+const config = loadConfig();
+
+// Tuning constants — adjust freely.
+const XP_PER_MINUTE_VOICE = 5; // XP per minute connected to a game room
+const XP_PER_MESSAGE = 3; // XP per eligible chat message in a game room
+const MESSAGE_XP_COOLDOWN_MS = 60 * 1000; // one XP-earning message per minute per user
+const WORK_HUNT_COOLDOWN_MS = 30 * 1000;
+const WORK_HUNT_MIN = 10;
+const WORK_HUNT_MAX = 50;
+const WORK_BATTLE_COOLDOWN_MS = 60 * 1000;
+const WORK_BATTLE_MIN = 20;
+const WORK_BATTLE_MAX = 100;
+const EMPTY_GRACE_MS = 5 * 60 * 1000; // delete an empty game room after 5 minutes
+const TICK_INTERVAL_MS = 60 * 1000; // voice-XP + empty-room sweep cadence
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
   ],
 });
 
-// Rooms created by the bot. Map<channelId, { ownerId, emptySince }>.
-// emptySince is a timestamp (ms) since the room became empty, or null.
-const tempChannels = new Map();
+// Game rooms created by the bot. Map<channelId, { ownerId, game, emptySince }>.
+const gameRooms = new Map();
 
-// Writes the current room list to disk so it survives a restart.
-function persistRooms() {
-  const rooms = {};
-  for (const [id, room] of tempChannels) rooms[id] = room.ownerId;
-  saveRooms(rooms);
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag} (id: ${client.user.id})`);
-  console.log(`Default room user limit: ${config.defaultUserLimit} (0 = unlimited)`);
-  console.log(`Configured lobby channel: ${JOIN_TO_CREATE_CHANNEL_ID || '(not configured)'}`);
+  console.log(`Configured games: ${games.join(', ')}`);
 
-  console.log(`Bot is in ${client.guilds.cache.size} guild(s):`);
-  for (const [id, guild] of client.guilds.cache) {
-    console.log(`  - ${guild.name} (id: ${id})`);
+  const lobby = client.channels.cache.get(GAME_LOBBY_CHANNEL_ID);
+  if (!lobby) {
+    console.warn(
+      `WARNING: game lobby channel ${GAME_LOBBY_CHANNEL_ID} not found. ` +
+        'Check GAME_LOBBY_CHANNEL_ID and that the bot is in that server.',
+    );
+  } else {
+    console.log(`Game lobby resolved: "${lobby.name}" in guild "${lobby.guild?.name}"`);
+    if (lobby.parentId) {
+      await ensureGamePicker(lobby.guild, lobby.parentId);
+    }
   }
 
-  if (JOIN_TO_CREATE_CHANNEL_ID) {
-    const lobby = client.channels.cache.get(JOIN_TO_CREATE_CHANNEL_ID);
-    if (lobby) {
-      console.log(`Lobby channel resolved: "${lobby.name}" in guild "${lobby.guild?.name}"`);
-    } else {
-      console.warn(
-        `WARNING: lobby channel ${JOIN_TO_CREATE_CHANNEL_ID} not found. ` +
-          'Check JOIN_TO_CREATE_CHANNEL_ID and that the bot is in that server.',
+  setInterval(() => {
+    tickVoiceXp();
+    sweepEmptyRooms().catch((err) => console.error('Sweep error:', err));
+    if (lobby?.parentId) {
+      ensureGamePicker(lobby.guild, lobby.parentId).catch((err) =>
+        console.error('Game picker re-check failed:', err),
       );
     }
-  }
-
-  // Re-adopt rooms created before the last restart so orphaned (empty) rooms
-  // still get cleaned up by the sweeper.
-  const persisted = loadRooms();
-  for (const [channelId, ownerId] of Object.entries(persisted)) {
-    try {
-      const channel = await client.channels.fetch(channelId);
-      if (channel) {
-        tempChannels.set(channelId, {
-          ownerId,
-          emptySince: channel.members.size === 0 ? Date.now() : null,
-        });
-      }
-    } catch {
-      // Channel no longer exists; drop it.
-    }
-  }
-  persistRooms(); // prune any that were deleted while offline
-  console.log(`Adopted ${tempChannels.size} room(s) from the previous session.`);
-
-  // Start the periodic sweeper.
-  setInterval(() => {
-    sweepRooms().catch((err) => console.error('Sweep error:', err));
-  }, SWEEP_INTERVAL_MS);
+  }, TICK_INTERVAL_MS);
 });
 
 /**
- * Deletes any tracked room that has been empty for longer than EMPTY_GRACE_MS.
- * Also prunes rooms that were deleted manually.
+ * Finds the shared "pengaturan" (settings) text channel in a category.
+ * Matches by substring so decorative characters around the name don't
+ * break the lookup.
  */
-async function sweepRooms() {
-  for (const [channelId, room] of tempChannels) {
+function findSettingsChannel(guild, categoryId) {
+  if (!categoryId) return null;
+  return (
+    guild.channels.cache.find(
+      (ch) =>
+        ch.parentId === categoryId &&
+        ch.type === ChannelType.GuildText &&
+        ch.name.toLowerCase().includes('pengaturan'),
+    ) ?? null
+  );
+}
+
+/**
+ * Builds the "pick a game" select menu message posted in the lobby
+ * category's #pengaturan channel.
+ */
+function buildGamePicker() {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('Create a Game Room')
+    .setDescription(
+      'Choose which game you\'re playing, then a voice room named after it ' +
+        `will be created and you'll be moved into it. **You must be ` +
+        `connected to <#${GAME_LOBBY_CHANNEL_ID}>** while picking.`,
+    );
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('game:pick')
+    .setPlaceholder('Select a game')
+    .addOptions(games.slice(0, 25).map((game) => ({ label: game, value: game })));
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] };
+}
+
+/**
+ * Posts the game picker in the category's #pengaturan channel if it isn't
+ * already there, re-posting only if the message was genuinely deleted
+ * (Discord 10008), not on a transient fetch error.
+ */
+async function ensureGamePicker(guild, categoryId) {
+  const settingsChannel = findSettingsChannel(guild, categoryId);
+  if (!settingsChannel) {
+    console.warn(
+      `WARNING: no text channel with "pengaturan" in its name found in category ${categoryId}; ` +
+        'the game picker was not posted there.',
+    );
+    return;
+  }
+
+  const saved = config.panelMessages?.[categoryId];
+  if (saved?.channelId === settingsChannel.id) {
+    try {
+      await settingsChannel.messages.fetch(saved.messageId);
+      return; // Already posted and still there.
+    } catch (err) {
+      if (err?.code !== 10008) {
+        console.warn(`Game picker fetch check failed (will retry later):`, err?.message ?? err);
+        return;
+      }
+      // else: genuinely deleted, fall through and repost.
+    }
+  }
+
+  try {
+    const message = await settingsChannel.send(buildGamePicker());
+    config.panelMessages = { ...(config.panelMessages ?? {}), [categoryId]: { channelId: settingsChannel.id, messageId: message.id } };
+    saveConfig(config);
+    console.log(`Posted the game picker in "${settingsChannel.name}"`);
+  } catch (err) {
+    console.error('Failed to post the game picker:', err);
+  }
+}
+
+/**
+ * Creates a game-named voice room for a member and moves them into it.
+ */
+async function createGameRoomFor(member, game) {
+  const guild = member.guild;
+  const lobby = client.channels.cache.get(GAME_LOBBY_CHANNEL_ID);
+  const parentId = lobby?.parentId ?? null;
+
+  try {
+    const channel = await guild.channels.create({
+      name: `${game} - ${member.displayName}`,
+      type: ChannelType.GuildVoice,
+      parent: parentId,
+    });
+
+    // Explicitly grant the bot itself access on this specific channel — a
+    // channel-level @everyone deny (if anyone ever locks the room) would
+    // otherwise override the bot's category-level allow, since Discord
+    // processes category overwrites before the channel's own.
+    try {
+      await channel.permissionOverwrites.edit(client.user.id, {
+        ViewChannel: true,
+        ManageChannels: true,
+        MoveMembers: true,
+        Connect: true,
+      });
+    } catch (err) {
+      console.error(`Failed to grant the bot its own overwrite on "${channel.name}":`, err);
+    }
+
+    if (member.voice.channel) {
+      try {
+        await member.voice.setChannel(channel);
+      } catch (err) {
+        console.error(`Failed to move ${member.user.tag} into "${channel.name}":`, err);
+      }
+    }
+
+    gameRooms.set(channel.id, { ownerId: member.id, game, emptySince: null });
+    console.log(`Created game room "${channel.name}" (${game}) for ${member.user.tag}`);
+    return channel;
+  } catch (err) {
+    console.error('Failed to create game room:', err);
+    return null;
+  }
+}
+
+/**
+ * Deletes a tracked game room if it's now empty (called on member leave).
+ */
+async function deleteIfEmpty(channel) {
+  if (!channel || !gameRooms.has(channel.id)) return;
+  if (channel.members.size > 0) return;
+
+  try {
+    await channel.delete('Game room is empty, deleted automatically');
+    gameRooms.delete(channel.id);
+    console.log(`Deleted empty game room "${channel.name}"`);
+  } catch (err) {
+    if (err?.code === 50001) {
+      console.warn(
+        `WARNING: lost access to game room "${channel.name}" (id: ${channel.id}) — ` +
+          'a server admin must delete it manually in Discord.',
+      );
+      gameRooms.delete(channel.id);
+      return;
+    }
+    console.error('Failed to delete game room:', err);
+  }
+}
+
+/** Periodic sweep: catches rooms left empty across a restart. */
+async function sweepEmptyRooms() {
+  for (const [channelId, room] of gameRooms) {
     let channel;
     try {
       channel = await client.channels.fetch(channelId);
     } catch {
       channel = null;
     }
-
     if (!channel) {
-      tempChannels.delete(channelId);
-      persistRooms();
+      gameRooms.delete(channelId);
       continue;
     }
-
     if (channel.members.size > 0) {
       room.emptySince = null;
       continue;
     }
-
-    // Room is empty: start / continue the grace timer.
     if (room.emptySince == null) {
       room.emptySince = Date.now();
       continue;
     }
-
     if (Date.now() - room.emptySince >= EMPTY_GRACE_MS) {
-      try {
-        await channel.delete('Empty for more than 5 minutes');
-        console.log(`Swept empty room "${channel.name}"`);
-      } catch (err) {
-        console.error('Failed to sweep room:', err);
+      await deleteIfEmpty(channel);
+    }
+  }
+}
+
+/** Awards voice-time XP to every non-bot member currently in a game room. */
+function tickVoiceXp() {
+  for (const [channelId] of gameRooms) {
+    const channel = client.channels.cache.get(channelId);
+    if (!channel) continue;
+    for (const [, member] of channel.members) {
+      if (member.user.bot) continue;
+      const user = getUser(member.id);
+      const result = addXp(user, XP_PER_MINUTE_VOICE);
+      if (result.leveledUp) {
+        announceLevelUp(channel, member.id, result);
       }
-      tempChannels.delete(channelId);
-      persistRooms();
     }
   }
+  saveUsers();
 }
 
-/**
- * Builds the control-panel message (embed + buttons) for a room.
- */
-function buildPanel(channel, ownerId) {
-  const everyone = channel.permissionOverwrites.cache.get(channel.guild.id);
-  const isLocked = everyone?.deny.has(PermissionFlagsBits.Connect) ?? false;
-  const isHidden = everyone?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
-
-  const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle(channel.name)
-    .setDescription(
-      `Welcome <@${ownerId}> to your voice room!\n` +
-        'Only the owner can use the buttons below to manage this room.',
-    )
-    .addFields(
-      { name: 'Owner', value: `<@${ownerId}>`, inline: true },
-      { name: 'Status', value: isLocked ? 'Locked' : 'Public', inline: true },
-      { name: 'Visibility', value: isHidden ? 'Hidden' : 'Visible', inline: true },
-      {
-        name: 'User limit',
-        value: channel.userLimit === 0 ? 'Unlimited' : String(channel.userLimit),
-        inline: true,
-      },
-    );
-
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('vc:lock')
-      .setLabel(isLocked ? 'Unlock' : 'Lock')
-      .setEmoji(isLocked ? '🔓' : '🔒')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('vc:hide')
-      .setLabel(isHidden ? 'Unhide' : 'Hide')
-      .setEmoji(isHidden ? '👁️' : '🙈')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('vc:limit')
-      .setLabel('Limit')
-      .setEmoji('🔢')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('vc:rename')
-      .setLabel('Rename')
-      .setEmoji('✏️')
-      .setStyle(ButtonStyle.Secondary),
-  );
-
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('vc:kick')
-      .setLabel('Kick')
-      .setEmoji('👢')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('vc:ban')
-      .setLabel('Ban')
-      .setEmoji('🔨')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('vc:permit')
-      .setLabel('Permit')
-      .setEmoji('✅')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('vc:claim')
-      .setLabel('Claim')
-      .setEmoji('👑')
-      .setStyle(ButtonStyle.Secondary),
-  );
-
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('vc:invite')
-      .setLabel('Invite')
-      .setEmoji('🔗')
-      .setStyle(ButtonStyle.Secondary),
-  );
-
-  return { embeds: [embed], components: [row1, row2, row3] };
-}
-
-/**
- * Creates a new voice room for a member and moves them into it.
- */
-async function createRoomFor(member, lobbyChannel) {
-  const guild = member.guild;
-  const parentId = CATEGORY_ID || lobbyChannel.parentId || null;
-
-  try {
-    const channel = await guild.channels.create({
-      name: `${member.displayName}'s Room`,
-      type: ChannelType.GuildVoice,
-      parent: parentId,
-      // 0 = unlimited. Configurable via the /setlimit command.
-      userLimit: config.defaultUserLimit,
-      permissionOverwrites: [
-        {
-          // Give the room owner full control over their channel.
-          id: member.id,
-          allow: [
-            PermissionFlagsBits.ManageChannels,
-            PermissionFlagsBits.MoveMembers,
-            PermissionFlagsBits.MuteMembers,
-            PermissionFlagsBits.Connect,
-          ],
-        },
-      ],
-    });
-
-    tempChannels.set(channel.id, { ownerId: member.id, emptySince: null });
-    persistRooms();
-
-    // Move the member into the new room (if still connected to voice).
-    if (member.voice.channel) {
-      await member.voice.setChannel(channel);
-    }
-
-    // Post the control panel in the room's built-in text chat.
-    try {
-      await channel.send(buildPanel(channel, member.id));
-    } catch (err) {
-      console.error('Failed to send control panel:', err);
-    }
-
-    console.log(`Created room "${channel.name}" for ${member.user.tag}`);
-    return channel;
-  } catch (err) {
-    console.error('Failed to create room:', err);
-    return null;
-  }
-}
-
-/**
- * Deletes the channel if it was created by the bot and is now empty.
- */
-async function deleteIfEmpty(channel) {
-  if (!channel || !tempChannels.has(channel.id)) return;
-  if (channel.members.size > 0) return;
-
-  try {
-    await channel.delete('Voice room is empty, deleted automatically');
-    tempChannels.delete(channel.id);
-    persistRooms();
-    console.log(`Deleted empty room "${channel.name}"`);
-  } catch (err) {
-    console.error('Failed to delete room:', err);
-  }
+function announceLevelUp(channel, userId, result) {
+  channel
+    .send({
+      content:
+        `🎉 <@${userId}> leveled up to **level ${result.toLevel}** and earned **${result.coinsEarned} coins**!`,
+    })
+    .catch(() => {});
 }
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  // 1) A user joined the lobby channel => create a new room for them.
-  if (newState.channelId === JOIN_TO_CREATE_CHANNEL_ID && newState.member) {
-    await createRoomFor(newState.member, newState.channel);
+  if (newState.member && newState.channelId === GAME_LOBBY_CHANNEL_ID) {
+    // Joining the lobby itself doesn't create a room — the member must
+    // pick a game from the picker in #pengaturan first.
   }
-
-  // 2) A user left a channel => delete it if it is now an empty bot room.
   if (oldState.channelId && oldState.channelId !== newState.channelId) {
     await deleteIfEmpty(oldState.channel);
   }
 });
 
-// ── Interaction router ──────────────────────────────────────────────────────
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!gameRooms.has(message.channelId)) return;
+
+  const user = getUser(message.author.id);
+  const now = Date.now();
+  if (now - user.lastMessageXpAt < MESSAGE_XP_COOLDOWN_MS) return;
+  user.lastMessageXpAt = now;
+  const result = addXp(user, XP_PER_MESSAGE);
+  saveUsers();
+  if (result.leveledUp) {
+    announceLevelUp(message.channel, message.author.id, result);
+  }
+});
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
-    if (interaction.isButton() && interaction.customId.startsWith('vc:')) {
-      return await handlePanelButton(interaction);
-    }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('vc:')) {
-      return await handlePanelModal(interaction);
-    }
-    if (
-      (interaction.isUserSelectMenu() || interaction.isStringSelectMenu()) &&
-      interaction.customId.startsWith('vc:')
-    ) {
-      return await handlePanelSelect(interaction);
+    if (interaction.isStringSelectMenu() && interaction.customId === 'game:pick') {
+      return await handleGamePick(interaction);
     }
   } catch (err) {
     console.error('Interaction handler error:', err);
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      interaction
-        .reply({
-          content:
-            'Something went wrong. The bot may be missing a permission ' +
-            '(Manage Roles / Manage Channels / Create Invite).',
-          ephemeral: true,
-        })
-        .catch(() => {});
+      interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
     }
   }
 });
 
-// Resolves the room record for the channel the interaction happened in.
-function getRoom(interaction) {
-  const channel = interaction.channel;
-  if (!channel || !tempChannels.has(channel.id)) return null;
-  return { channel, room: tempChannels.get(channel.id) };
+async function handleGamePick(interaction) {
+  if (interaction.member?.voice?.channelId !== GAME_LOBBY_CHANNEL_ID) {
+    return interaction.reply({
+      content: `Join <#${GAME_LOBBY_CHANNEL_ID}> first, then pick your game here.`,
+      ephemeral: true,
+    });
+  }
+  const game = interaction.values[0];
+  const channel = await createGameRoomFor(interaction.member, game);
+  return interaction.reply({
+    content: channel
+      ? `Room created for **${game}** — you have been moved into it.`
+      : 'Failed to create the room. Check the bot permissions.',
+    ephemeral: true,
+  });
 }
 
 async function handleSlashCommand(interaction) {
-  console.log(
-    `interaction: /${interaction.commandName} from ${interaction.user.tag} ` +
-      `in guild ${interaction.guildId}`,
-  );
+  const { commandName } = interaction;
 
-  if (interaction.commandName === 'voice') {
-    const member = interaction.member;
-    if (!member?.voice?.channel) {
+  if (commandName === 'wh') {
+    const user = getUser(interaction.user.id);
+    const now = Date.now();
+    const remaining = WORK_HUNT_COOLDOWN_MS - (now - user.lastWorkHuntAt);
+    if (remaining > 0) {
       return interaction.reply({
-        content: 'You must be in a voice channel to use this command.',
+        content: `You can hunt again in ${Math.ceil(remaining / 1000)}s.`,
         ephemeral: true,
       });
     }
-    const room = await createRoomFor(member, member.voice.channel);
+    const earned = randomInt(WORK_HUNT_MIN, WORK_HUNT_MAX);
+    user.lastWorkHuntAt = now;
+    user.coins += earned;
+    saveUsers();
+    return interaction.reply(`🔫 ${interaction.user} went hunting and found **${earned} coins**!`);
+  }
+
+  if (commandName === 'wb') {
+    const user = getUser(interaction.user.id);
+    const now = Date.now();
+    const remaining = WORK_BATTLE_COOLDOWN_MS - (now - user.lastWorkBattleAt);
+    if (remaining > 0) {
+      return interaction.reply({
+        content: `You can battle again in ${Math.ceil(remaining / 1000)}s.`,
+        ephemeral: true,
+      });
+    }
+    const earned = randomInt(WORK_BATTLE_MIN, WORK_BATTLE_MAX);
+    user.lastWorkBattleAt = now;
+    user.coins += earned;
+    saveUsers();
+    return interaction.reply(`⚔️ ${interaction.user} won a battle and earned **${earned} coins**!`);
+  }
+
+  if (commandName === 'balance') {
+    const target = interaction.options.getUser('user') ?? interaction.user;
+    const user = getUser(target.id);
     return interaction.reply({
-      content: room
-        ? `Room created: **${room.name}** — you have been moved into it.`
-        : 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
-      ephemeral: true,
+      content: `${target}: **${user.coins} coins**`,
+      ephemeral: target.id === interaction.user.id,
     });
   }
 
-  if (interaction.commandName === 'setlimit') {
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply({
-        content: 'You need the Manage Channels permission to use this command.',
-        ephemeral: true,
-      });
-    }
-    const limit = interaction.options.getInteger('count', true);
-    config.defaultUserLimit = limit;
-    saveConfig(config);
-    const label = limit === 0 ? 'unlimited' : `${limit} user(s)`;
-    console.log(`${interaction.user.tag} set default room limit to ${label}`);
+  if (commandName === 'level') {
+    const target = interaction.options.getUser('user') ?? interaction.user;
+    const user = getUser(target.id);
+    const need = xpToNextLevel(user.level);
     return interaction.reply({
-      content: `Default room user limit set to **${label}**. This applies to newly created rooms.`,
-      ephemeral: true,
+      content: `${target}: **Level ${user.level}** — ${user.xp} XP (${need} XP to next level) — **${user.coins} coins**`,
+      ephemeral: target.id === interaction.user.id,
     });
   }
 }
 
-async function handlePanelButton(interaction) {
-  const info = getRoom(interaction);
-  if (!info) {
-    return interaction.reply({ content: 'This panel is no longer active.', ephemeral: true });
-  }
-  const { channel, room } = info;
-  const action = interaction.customId.split(':')[1];
-  const everyoneId = channel.guild.id;
-
-  // Every action except "claim" is owner-only.
-  if (action !== 'claim' && interaction.user.id !== room.ownerId) {
-    return interaction.reply({
-      content: 'Only the room owner can use these controls.',
-      ephemeral: true,
-    });
-  }
-
-  switch (action) {
-    case 'lock': {
-      const locked =
-        channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.Connect) ?? false;
-      await channel.permissionOverwrites.edit(everyoneId, { Connect: locked ? null : false });
-      return interaction.update(buildPanel(channel, room.ownerId));
-    }
-    case 'hide': {
-      const hidden =
-        channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
-      await channel.permissionOverwrites.edit(everyoneId, { ViewChannel: hidden ? null : false });
-      return interaction.update(buildPanel(channel, room.ownerId));
-    }
-    case 'limit': {
-      const modal = new ModalBuilder().setCustomId('vc:limitModal').setTitle('Set user limit');
-      const input = new TextInputBuilder()
-        .setCustomId('value')
-        .setLabel('Max users (0-99, 0 = unlimited)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
-    }
-    case 'rename': {
-      const modal = new ModalBuilder().setCustomId('vc:renameModal').setTitle('Rename room');
-      const input = new TextInputBuilder()
-        .setCustomId('value')
-        .setLabel('New room name')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(100);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
-    }
-    case 'kick': {
-      // Only offer members currently connected to this room (except the owner).
-      const members = channel.members.filter((m) => m.id !== room.ownerId);
-      if (members.size === 0) {
-        return interaction.reply({
-          content: 'There is no one else in this room to kick.',
-          ephemeral: true,
-        });
-      }
-      const options = members
-        .first(25)
-        .map((m) => ({ label: m.displayName, value: m.id }));
-      const select = new StringSelectMenuBuilder()
-        .setCustomId('vc:kickSelect')
-        .setPlaceholder('Select a member in this room to disconnect')
-        .setMaxValues(1)
-        .addOptions(options);
-      return interaction.reply({
-        content: 'Choose who to disconnect from this room:',
-        components: [new ActionRowBuilder().addComponents(select)],
-        ephemeral: true,
-      });
-    }
-    case 'ban': {
-      const select = new UserSelectMenuBuilder()
-        .setCustomId('vc:banSelect')
-        .setPlaceholder('Select a user to ban from this room')
-        .setMaxValues(1);
-      return interaction.reply({
-        content: 'Choose who to ban (they will be blocked from joining). Use Permit to undo.',
-        components: [new ActionRowBuilder().addComponents(select)],
-        ephemeral: true,
-      });
-    }
-    case 'permit': {
-      const select = new UserSelectMenuBuilder()
-        .setCustomId('vc:permitSelect')
-        .setPlaceholder('Select a user to permit')
-        .setMaxValues(1);
-      return interaction.reply({
-        content: 'Choose who to permit (allow to join and see this room):',
-        components: [new ActionRowBuilder().addComponents(select)],
-        ephemeral: true,
-      });
-    }
-    case 'claim': {
-      if (channel.members.has(room.ownerId)) {
-        return interaction.reply({
-          content: 'The current owner is still here — you cannot claim this room.',
-          ephemeral: true,
-        });
-      }
-      room.ownerId = interaction.user.id;
-      persistRooms();
-      await channel.permissionOverwrites.edit(interaction.user.id, {
-        ManageChannels: true,
-        MoveMembers: true,
-        MuteMembers: true,
-        Connect: true,
-      });
-      return interaction.update(buildPanel(channel, room.ownerId));
-    }
-    case 'invite': {
-      const invite = await channel.createInvite({ maxAge: 3600, maxUses: 0 });
-      return interaction.reply({
-        content: `Invite link (valid for 1 hour): ${invite.url}`,
-        ephemeral: true,
-      });
-    }
-    default:
-      return interaction.reply({ content: 'Unknown action.', ephemeral: true });
-  }
-}
-
-async function handlePanelModal(interaction) {
-  const info = getRoom(interaction);
-  if (!info) {
-    return interaction.reply({ content: 'This panel is no longer active.', ephemeral: true });
-  }
-  const { channel, room } = info;
-  if (interaction.user.id !== room.ownerId) {
-    return interaction.reply({ content: 'Only the room owner can do that.', ephemeral: true });
-  }
-  const value = interaction.fields.getTextInputValue('value').trim();
-
-  if (interaction.customId === 'vc:limitModal') {
-    const n = Number.parseInt(value, 10);
-    if (Number.isNaN(n) || n < 0 || n > 99) {
-      return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
-    }
-    await channel.setUserLimit(n);
-    if (interaction.message) {
-      await interaction.message.edit(buildPanel(channel, room.ownerId)).catch(() => {});
-    }
-    return interaction.reply({
-      content: `User limit set to ${n === 0 ? 'unlimited' : n}.`,
-      ephemeral: true,
-    });
-  }
-
-  if (interaction.customId === 'vc:renameModal') {
-    await channel.setName(value);
-    if (interaction.message) {
-      await interaction.message.edit(buildPanel(channel, room.ownerId)).catch(() => {});
-    }
-    return interaction.reply({ content: `Room renamed to "${value}".`, ephemeral: true });
-  }
-}
-
-async function handlePanelSelect(interaction) {
-  const info = getRoom(interaction);
-  if (!info) {
-    return interaction.update({ content: 'This panel is no longer active.', components: [] });
-  }
-  const { channel, room } = info;
-  if (interaction.user.id !== room.ownerId) {
-    return interaction.update({ content: 'Only the room owner can do that.', components: [] });
-  }
-  const targetId = interaction.values[0];
-
-  if (interaction.customId === 'vc:kickSelect') {
-    const member = await channel.guild.members.fetch(targetId).catch(() => null);
-    if (member?.voice?.channelId === channel.id) {
-      await member.voice.disconnect('Removed by room owner');
-      return interaction.update({ content: `Disconnected <@${targetId}>.`, components: [] });
-    }
-    return interaction.update({ content: 'That user is no longer in this room.', components: [] });
-  }
-
-  if (interaction.customId === 'vc:banSelect') {
-    if (targetId === room.ownerId) {
-      return interaction.update({ content: 'You cannot ban yourself.', components: [] });
-    }
-    // Block the user from connecting to / seeing this room.
-    await channel.permissionOverwrites.edit(targetId, { Connect: false, ViewChannel: false });
-    // If they are currently inside, disconnect them too.
-    const member = await channel.guild.members.fetch(targetId).catch(() => null);
-    if (member?.voice?.channelId === channel.id) {
-      await member.voice.disconnect('Banned by room owner').catch(() => {});
-    }
-    return interaction.update({
-      content: `Banned <@${targetId}> from this room. Use Permit to undo.`,
-      components: [],
-    });
-  }
-
-  if (interaction.customId === 'vc:permitSelect') {
-    // Also clears a ban (re-allows Connect + ViewChannel).
-    await channel.permissionOverwrites.edit(targetId, { Connect: true, ViewChannel: true });
-    return interaction.update({ content: `Permitted <@${targetId}> to join this room.`, components: [] });
-  }
-}
-
-// Note: rooms are only tracked for the current session. After a restart,
-// previously created rooms are no longer tracked (and won't be auto-deleted).
 client.login(DISCORD_TOKEN);

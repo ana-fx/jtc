@@ -1,22 +1,23 @@
-# JTC — Discord Voice Room Bot
+# Olaf — Game Room + Leveling Bot
 
-A Discord bot that automatically creates **voice rooms** for users. Three ways to use it:
+A Discord bot for the "Ruang Game" (Game Room) category:
 
-1. **Join to Create** — a user simply joins a designated "lobby" voice channel, and the bot instantly creates a new room and moves them into it. The room is **automatically deleted once empty**.
-2. **Slash command `/voice`** — a user already in a voice channel can create a private room at any time.
-3. **Slash command `/setlimit <count>`** — an admin (with the *Manage Channels* permission) sets the maximum number of users allowed in each new room. `0` = unlimited, max `99`. The value is stored in `config.json` and persists across restarts.
+1. **Room by game** — members join the game lobby voice channel, then pick a game from a dropdown posted in that category's `#pengaturan` channel. A voice room named after the chosen game is created and they're moved into it. The room is deleted automatically once empty for 5 minutes.
+2. **XP & leveling** — members earn XP for time spent connected to a game room (`5 XP/minute`) and for chatting in that room's text chat (`3 XP` per eligible message, one per minute per user). Leveling up announces in the room and pays out coins.
+3. **Coins** — `/wh` (work: hunt) and `/wb` (work: battle) give a random amount of coins on a cooldown (30s / 60s). Leveling up also pays a flat coin reward per band: levels 1-5 pay 500, 6-10 pay 750, 11-15 pay 1000, and so on (+250 every 5 levels).
+4. `/balance` and `/level` check your (or someone else's) coins / level+XP.
+
+Shop and gacha cards are intentionally **not** included yet — planned for a later phase.
 
 ---
 
 ## 1. Prerequisites
 
-Requires **Node.js version 18 or newer**. Check with:
+Node.js 18+:
 
 ```bash
 node --version
 ```
-
-Install dependencies:
 
 ```bash
 npm install
@@ -24,66 +25,38 @@ npm install
 
 ## 2. Create the Bot on Discord
 
-1. Open https://discord.com/developers/applications → **New Application**.
-2. Go to **Bot** → **Reset Token** → copy the token → paste it into `DISCORD_TOKEN` in the `.env` file.
-3. On the **Bot** page, the *Voice States* intent (used by this bot) is enabled by default; you don't need Server Members or Presence intents.
-4. Go to **OAuth2 → URL Generator**: check the **`bot`** and **`applications.commands`** scopes, then under **Bot Permissions** check:
-   - Manage Channels
-   - Move Members
-   - Connect
-   - View Channels
-5. Open the generated URL to **invite the bot** to your server.
+1. https://discord.com/developers/applications → **New Application**.
+2. **Bot** → **Reset Token** → paste into `DISCORD_TOKEN` in `.env`.
+3. **OAuth2 → URL Generator**: scopes `bot` + `applications.commands`; permissions: View Channels, Manage Channels, Move Members, Connect.
+4. Open the generated URL to invite the bot.
 
 ## 3. Configure
-
-Copy the template and fill in the values:
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in `.env`:
-
 | Variable | How to get it |
 |---|---|
-| `DISCORD_TOKEN` | From the Bot page (step 2) |
+| `DISCORD_TOKEN` | Bot page (step 2) |
 | `CLIENT_ID` | General Information → Application ID |
-| `GUILD_ID` | Right-click the server name → Copy Server ID |
-| `JOIN_TO_CREATE_CHANNEL_ID` | Create a voice channel (e.g. "Join to Create"), right-click it → Copy Channel ID |
-| `CATEGORY_ID` | (optional) category where new rooms are created |
+| `GUILD_ID` | Right-click server name → Copy Server ID |
+| `GAME_LOBBY_CHANNEL_ID` | Right-click the "Ruang Game" voice channel → Copy Channel ID |
+| `GAMES` | Comma-separated game names for the picker |
 
-> To use "Copy ... ID", enable **Developer Mode** in Discord: Settings → Advanced → Developer Mode.
+The category the lobby sits in must have a text channel with "pengaturan" somewhere in its name — that's where the game picker gets posted.
 
-## 4. Register Slash Commands
+## 4. Register slash commands & run
 
 ```bash
 npm run deploy
-```
-
-## 5. Run the Bot
-
-```bash
 npm start
 ```
 
-When you see `Logged in as ...`, the bot is active. Try joining the lobby channel, or type `/voice` in the server.
-
----
-
-## How It Works
-
-- **`index.js`** — listens for the `voiceStateUpdate` event. When someone joins the lobby, the bot creates a new channel and moves them into it. When a bot-created channel becomes empty, it is deleted.
-- Rooms are tracked only while the bot is running. **If the bot restarts**, previously created rooms are no longer tracked (and won't be auto-deleted). For permanent tracking, this would need a database (can be added later).
-
 ## Deployment
 
-See [DEPLOY.md](DEPLOY.md) for deploying to a VPS with PM2. A GitHub Actions
-workflow ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) is
-included to auto-deploy on every push to `main`.
+Same pattern as the `jtc` room bots: PM2 (`ecosystem.config.cjs`) + a GitHub Actions workflow that deploys on push to `main`. The workflow needs these repository secrets (Settings → Secrets and variables → Actions) — **the same VPS**, so the values match whatever was used for the `jtc` repo, but must be added again here since GitHub secrets don't carry across repos:
 
-## Troubleshooting
+- `VPS_HOST`, `VPS_USER`, `VPS_PORT`, `VPS_SSH_KEY`
 
-- **Bot is online but doesn't create rooms** → check that `JOIN_TO_CREATE_CHANNEL_ID` is correct and that the bot has the *Manage Channels* + *Move Members* permissions on that category.
-- **`/voice` doesn't show up** → run `npm run deploy` again, and make sure the bot was invited with the `applications.commands` scope.
-- **Error `Used disallowed intents`** → check the intent settings in the Developer Portal.
-- **Error 50013 (Missing Permissions)** → the bot needs *Manage Channels* on the specific category where rooms are created; category-level permission overwrites can override server-level ones.
+First-time setup on the VPS is automatic — the workflow clones the repo into `~/olaf-bot` if it isn't there yet.

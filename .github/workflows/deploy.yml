@@ -1,12 +1,13 @@
-name: Deploy to VPS
+name: Deploy Olaf to VPS
 
-# Auto-deploy on every push to main. The job SSHes into the VPS, pulls the
-# latest code, installs dependencies, (re)registers slash commands, and
-# restarts the bot under PM2.
+# Auto-deploy on every push to the olaf branch of this repo. Clones/updates
+# ~/olaf-bot on the VPS, installs dependencies, registers slash commands,
+# and restarts under PM2. Reuses this repo's VPS secrets — same server as
+# the jtc/snowy bots, just a separate deploy directory and process.
 on:
   push:
-    branches: [main]
-  workflow_dispatch: {} # allow manual runs from the Actions tab
+    branches: [olaf]
+  workflow_dispatch: {}
 
 jobs:
   deploy:
@@ -21,11 +22,13 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           script: |
             set -e
-            cd ~/jtc-bot
-            # fetch+reset keeps the VPS exactly on origin/main, even after a
-            # history rewrite (a plain pull would try to merge old commits).
-            git fetch origin main
-            git reset --hard origin/main
+            if [ ! -d ~/olaf-bot/.git ]; then
+              git clone -b olaf https://github.com/ana-fx/jtc.git ~/olaf-bot
+            fi
+            cd ~/olaf-bot
+            git fetch origin olaf
+            git reset --hard origin/olaf
             npm ci --omit=dev
             npm run deploy
-            pm2 restart jtc-voice-bot
+            pm2 startOrRestart ecosystem.config.cjs
+            pm2 save

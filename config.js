@@ -6,8 +6,10 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, 'config.json');
 
-// defaultUserLimit: max users allowed in each new room. 0 = unlimited.
-const DEFAULTS = { defaultUserLimit: 0 };
+// panelMessages: { [categoryId]: { channelId, messageId } } — locates the
+// game-picker message posted per category, so it isn't reposted every
+// restart.
+const DEFAULTS = { panelMessages: {} };
 
 export function loadConfig() {
   if (!existsSync(CONFIG_PATH)) return { ...DEFAULTS };

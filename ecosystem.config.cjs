@@ -1,11 +1,11 @@
-// PM2 process definition for the Discord voice-room bot.
+// PM2 process definition for Olaf.
 // Usage on the VPS:
 //   pm2 start ecosystem.config.cjs
 //   pm2 save        # persist across reboots (run `pm2 startup` once first)
 module.exports = {
   apps: [
     {
-      name: 'jtc-voice-bot',
+      name: 'olaf-bot',
       script: 'index.js',
       instances: 1,
       autorestart: true,
