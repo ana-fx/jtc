@@ -242,7 +242,7 @@ async function createGameRoomFor(member, game) {
 
   try {
     const channel = await guild.channels.create({
-      name: `${game} - ${member.displayName}`,
+      name: game,
       type: ChannelType.GuildVoice,
       parent: parentId,
     });
