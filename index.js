@@ -720,11 +720,17 @@ async function handleSlashCommand(interaction) {
         ephemeral: true,
       });
     }
-    const room = await createRoomFor(member, member.voice.channel);
+    const channel = await createRoomFor(member, member.voice.channel);
+    if (!channel) {
+      return interaction.reply({
+        content: 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
+        ephemeral: true,
+      });
+    }
+    const room = tempChannels.get(channel.id);
     return interaction.reply({
-      content: room
-        ? `Room created: **${room.name}** — you have been moved into it.`
-        : 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
+      ...buildRoomControls(channel, room),
+      content: `Room created: **${channel.name}** — you have been moved into it.`,
       ephemeral: true,
     });
   }
@@ -964,11 +970,19 @@ async function handleCreatePick(interaction) {
     return interaction.reply({ content: 'That lobby channel no longer exists.', ephemeral: true });
   }
   const limit = Number.parseInt(interaction.values[0], 10);
-  const room = await createRoomFor(interaction.member, lobbyChannel, lobbyCfg, limit);
+  const channel = await createRoomFor(interaction.member, lobbyChannel, lobbyCfg, limit);
+  if (!channel) {
+    return interaction.reply({
+      content: 'Failed to create the room. Check the bot permissions.',
+      ephemeral: true,
+    });
+  }
+  // Skip the extra "Manage a Room -> pick from a list" round trip for the
+  // room they just made: show its controls immediately.
+  const room = tempChannels.get(channel.id);
   return interaction.reply({
-    content: room
-      ? `Room created with a limit of ${limit} — you have been moved into it.`
-      : 'Failed to create the room. Check the bot permissions.',
+    ...buildRoomControls(channel, room),
+    content: `Room created with a limit of ${limit} — you have been moved into it.`,
     ephemeral: true,
   });
 }
