@@ -293,11 +293,13 @@ function buildPanel(boundedLobbiesInCategory = []) {
 }
 
 /**
- * Builds the per-room controls shown after picking a room from "Manage a
- * Room": a status embed for that specific room plus its action buttons,
- * each with the room's id embedded in its customId (vc:<action>:<roomId>)
- * so the follow-up interaction (a button click, modal submit, or select
- * choice) resolves back to this exact room via resolveRoomById.
+ * Builds the per-room controls: a status embed for that specific room plus
+ * its action buttons, each with the room's id embedded in its customId
+ * (vc:<action>:<roomId>) so the follow-up interaction (a button click,
+ * modal submit, or select choice) resolves back to this exact room via
+ * resolveRoomById. Posted once as a persistent message in the room's own
+ * text chat when it's created (see createRoomFor) — there's no Limit
+ * button since the limit is fixed at creation time and isn't editable.
  */
 function buildRoomControls(channel, room) {
   const everyone = channel.permissionOverwrites.cache.get(channel.guild.id);
@@ -336,7 +338,6 @@ function buildRoomControls(channel, room) {
       .setLabel(isHidden ? 'Unhide' : 'Hide')
       .setEmoji(isHidden ? '👁️' : '🙈')
       .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`vc:limit:${channel.id}`).setLabel('Limit').setEmoji('🔢').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`vc:rename:${channel.id}`).setLabel('Rename').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
   );
 
@@ -496,19 +497,25 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null, chosenLimit 
       console.warn(`${member.user.tag} was not connected to voice at room-creation time; not moved.`);
     }
 
-    // No per-room panel to post: the category's one combined panel (posted
-    // at startup by ensurePanel) already covers this room too — "Manage a
-    // Room" lists it by categoryId/name and its controls resolve back to it
-    // by channel id once picked.
-    tempChannels.set(channel.id, {
+    const room = {
       ownerId: member.id,
       emptySince: null,
       min: lobbyCfg?.min ?? 0,
       max: lobbyCfg?.max ?? 0,
       categoryId: parentId,
       name: channel.name,
-    });
+    };
+    tempChannels.set(channel.id, room);
     persistRooms();
+
+    // Post the persistent control panel directly in the room's own chat
+    // (visible to whoever is in the room, unlike the earlier design where
+    // this only appeared as an ephemeral reply to the creator).
+    try {
+      await channel.send(buildRoomControls(channel, room));
+    } catch (err) {
+      console.error(`Failed to post room controls in "${channel.name}":`, err);
+    }
 
     console.log(`Created room "${channel.name}" for ${member.user.tag}`);
     return channel;
@@ -663,16 +670,10 @@ async function handleSlashCommand(interaction) {
       });
     }
     const channel = await createRoomFor(member, member.voice.channel);
-    if (!channel) {
-      return interaction.reply({
-        content: 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
-        ephemeral: true,
-      });
-    }
-    const room = tempChannels.get(channel.id);
     return interaction.reply({
-      ...buildRoomControls(channel, room),
-      content: `Room created: **${channel.name}** — you have been moved into it.`,
+      content: channel
+        ? `Room created: **${channel.name}** — you have been moved into it. Check the room's text chat for its controls.`
+        : 'Failed to create the room. Check the bot permissions (Manage Channels & Move Members).',
       ephemeral: true,
     });
   }
@@ -737,26 +738,6 @@ async function handlePanelButton(interaction) {
         throw err;
       }
       return interaction.update(buildRoomControls(channel, room));
-    }
-    case 'limit': {
-      const min = room.min ?? 0;
-      const max = room.max ?? 0;
-      let label;
-      if (min === 0 && max === 0) {
-        label = 'Max users (0-99, 0 = unlimited)';
-      } else if (max === 0) {
-        label = `Max users (minimum ${min})`;
-      } else {
-        label = `Max users (${min}-${max})`;
-      }
-      const modal = new ModalBuilder().setCustomId(`vc:limitModal:${channel.id}`).setTitle('Set user limit');
-      const input = new TextInputBuilder()
-        .setCustomId('value')
-        .setLabel(label)
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
     }
     case 'rename': {
       const modal = new ModalBuilder().setCustomId(`vc:renameModal:${channel.id}`).setTitle('Rename room');
@@ -855,30 +836,6 @@ async function handlePanelModal(interaction) {
   }
   const value = interaction.fields.getTextInputValue('value').trim();
 
-  if (modalName === 'limitModal') {
-    const n = Number.parseInt(value, 10);
-    if (Number.isNaN(n) || n < 0 || n > 99) {
-      return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
-    }
-    // Enforce the room's allowed range (set by the lobby it was created from).
-    const min = room.min ?? 0;
-    const max = room.max ?? 0;
-    if (min > 0 && n < min) {
-      return interaction.reply({
-        content: `This room type requires a limit of at least ${min}.`,
-        ephemeral: true,
-      });
-    }
-    if (max > 0 && n > max) {
-      return interaction.reply({
-        content: `This room type allows a limit of at most ${max}.`,
-        ephemeral: true,
-      });
-    }
-    await channel.setUserLimit(n);
-    return interaction.update(buildRoomControls(channel, room));
-  }
-
   if (modalName === 'renameModal') {
     await channel.setName(value);
     room.name = value;
@@ -913,18 +870,10 @@ async function handleCreatePick(interaction) {
   }
   const limit = Number.parseInt(interaction.values[0], 10);
   const channel = await createRoomFor(interaction.member, lobbyChannel, lobbyCfg, limit);
-  if (!channel) {
-    return interaction.reply({
-      content: 'Failed to create the room. Check the bot permissions.',
-      ephemeral: true,
-    });
-  }
-  // Skip the extra "Manage a Room -> pick from a list" round trip for the
-  // room they just made: show its controls immediately.
-  const room = tempChannels.get(channel.id);
   return interaction.reply({
-    ...buildRoomControls(channel, room),
-    content: `Room created with a limit of ${limit} — you have been moved into it.`,
+    content: channel
+      ? `Room created with a limit of ${limit} — you have been moved into it. Check the room's text chat for its controls.`
+      : 'Failed to create the room. Check the bot permissions.',
     ephemeral: true,
   });
 }
