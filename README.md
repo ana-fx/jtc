@@ -5,7 +5,9 @@ A Discord bot that automatically creates **voice rooms** for users. Three ways t
 1. **Join to Create** — a user simply joins a designated "lobby" voice channel, and the bot instantly creates a new room and moves them into it. The room is **automatically deleted once empty**.
 2. **Slash command `/voice`** — a user already in a voice channel can create a private room at any time.
 3. **Slash command `/setlimit <count>`** — an admin (with the *Manage Channels* permission) sets the maximum number of users allowed in each new room. `0` = unlimited, max `99`. The value is stored in `config.json` and persists across restarts.
-4. **Limit lobbies** — multiple lobby channels, each producing rooms with its own user-limit range (e.g. Bedroom 1-3, Library 4-6, Family Room 7+). Rooms start at the range minimum, are created in the same category as their lobby, and the owner can only change the limit within the range. Configured via the `LOBBIES` env var — see `.env.example`.
+4. **Limit lobbies** — multiple lobby channels, each producing rooms with its own user-limit range (e.g. Bedroom 1-3, Library 4-6, Family Room 7+). Rooms are created in the same category as their lobby, and the owner can only change the limit within the range. Configured via the `LOBBIES` env var — see `.env.example`.
+   - **Bounded lobbies** (a finite max, e.g. `1:3`) don't auto-create on join: the bot posts a "choose your room size" picker in the lobby's own chat, listing every value in the range. The member must stay connected to the lobby while picking; the room is then created with exactly that limit and they're moved in.
+   - **Unbounded lobbies** (`max` = `0`, e.g. `7:0`) keep the simple auto-create-on-join behavior, starting at the minimum.
 
 ---
 

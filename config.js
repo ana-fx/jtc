@@ -14,7 +14,9 @@ const CONFIG_PATH = join(__dirname, `config${suffix}.json`);
 // panelMessages: { [categoryId]: { channelId, messageId } } — locates the
 // one static control panel posted per category, so it isn't reposted on
 // every restart.
-const DEFAULTS = { defaultUserLimit: 0, panelMessages: {} };
+// createPickers: { [lobbyChannelId]: { channelId, messageId } } — locates
+// the "choose your room size" picker posted in a bounded lobby's own chat.
+const DEFAULTS = { defaultUserLimit: 0, panelMessages: {}, createPickers: {} };
 
 export function loadConfig() {
   if (!existsSync(CONFIG_PATH)) return { ...DEFAULTS };

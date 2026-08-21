@@ -80,6 +80,11 @@ const tempChannels = new Map();
 // in clientReady and reused by the periodic panel self-heal check.
 const categoryGuilds = new Map();
 
+// lobbyChannelId -> { channel, lobbyCfg }, for every bounded lobby (max > 0).
+// Populated once in clientReady and reused by the periodic create-picker
+// self-heal check.
+const boundedLobbies = new Map();
+
 // Writes the current room list to disk so it survives a restart.
 function persistRooms() {
   const rooms = {};
@@ -163,12 +168,28 @@ client.once('clientReady', async () => {
     await ensureSettingsPanel(guild, categoryId);
   }
 
-  // Start the periodic sweeper (empty-room cleanup + panel self-heal).
+  // Bounded lobbies (max > 0) get a "choose your room size" picker in their
+  // own chat instead of auto-creating on join.
+  for (const [lobbyId, lobbyCfg] of lobbies) {
+    if (lobbyCfg.max === 0) continue;
+    const lobby = client.channels.cache.get(lobbyId);
+    if (lobby) boundedLobbies.set(lobbyId, { channel: lobby, lobbyCfg });
+  }
+  for (const { channel, lobbyCfg } of boundedLobbies.values()) {
+    await ensureCreatePicker(channel, lobbyCfg);
+  }
+
+  // Start the periodic sweeper (empty-room cleanup + panel/picker self-heal).
   setInterval(() => {
     sweepRooms().catch((err) => console.error('Sweep error:', err));
     for (const [categoryId, guild] of categoryGuilds) {
       ensureSettingsPanel(guild, categoryId).catch((err) =>
         console.error(`Panel re-check failed for category ${categoryId}:`, err),
+      );
+    }
+    for (const { channel, lobbyCfg } of boundedLobbies.values()) {
+      ensureCreatePicker(channel, lobbyCfg).catch((err) =>
+        console.error(`Create-picker re-check failed for "${channel.name}":`, err),
       );
     }
   }, SWEEP_INTERVAL_MS);
@@ -299,6 +320,61 @@ async function ensureSettingsPanel(guild, categoryId) {
 }
 
 /**
+ * Builds the "choose your room size" picker for a bounded lobby (one with a
+ * finite max, e.g. min 1 / max 3): a select menu listing every user-limit
+ * value in [min, max]. Posted once in the lobby voice channel's own chat.
+ */
+function buildCreatePicker(lobbyCfg) {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('Create Your Room')
+    .setDescription(
+      'Choose how many people can join your room, then it will be created ' +
+        'and you will be moved into it automatically. **You must stay ' +
+        'connected to this voice channel** while picking.',
+    );
+
+  const options = [];
+  for (let n = lobbyCfg.min; n <= lobbyCfg.max; n++) {
+    options.push({ label: `${n} user${n === 1 ? '' : 's'}`, value: String(n) });
+  }
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('vc:createPick')
+    .setPlaceholder('Select a room size')
+    .addOptions(options);
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] };
+}
+
+/**
+ * Posts the create-size picker in a bounded lobby's own chat if it isn't
+ * already there, re-posting if it was deleted. Mirrors ensureSettingsPanel.
+ */
+async function ensureCreatePicker(lobbyChannel, lobbyCfg) {
+  const saved = config.createPickers?.[lobbyChannel.id];
+  if (saved?.channelId === lobbyChannel.id) {
+    try {
+      await lobbyChannel.messages.fetch(saved.messageId);
+      return; // Picker already posted and still there.
+    } catch {
+      // Message was deleted; fall through and repost it.
+    }
+  }
+
+  try {
+    const message = await lobbyChannel.send(buildCreatePicker(lobbyCfg));
+    config.createPickers = {
+      ...(config.createPickers ?? {}),
+      [lobbyChannel.id]: { channelId: lobbyChannel.id, messageId: message.id },
+    };
+    saveConfig(config);
+    console.log(`Posted the create-size picker in "${lobbyChannel.name}"`);
+  } catch (err) {
+    console.error(`Failed to post the create-size picker in "${lobbyChannel.name}":`, err);
+  }
+}
+
+/**
  * Finds the shared "pengaturan" (settings) text channel in a category, so
  * room control panels can be posted there instead of in each room's own
  * chat. Matches by substring so the decorative characters some server owners
@@ -318,11 +394,12 @@ function findSettingsChannel(guild, categoryId) {
 
 /**
  * Creates a new voice room for a member and moves them into it.
- * When lobbyCfg is set (a configured limit lobby), the room starts at the
- * lobby's minimum limit and stays in the lobby's own category so each room
- * type groups under its lobby.
+ * When lobbyCfg is set (a configured limit lobby), the room stays in the
+ * lobby's own category so each room type groups under its lobby. chosenLimit
+ * overrides lobbyCfg.min — used when the member picked a specific size from
+ * a bounded lobby's create-picker instead of getting the lobby's default.
  */
-async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
+async function createRoomFor(member, lobbyChannel, lobbyCfg = null, chosenLimit = null) {
   const guild = member.guild;
   const parentId = lobbyCfg
     ? lobbyChannel.parentId || null
@@ -330,7 +407,7 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
 
   console.log(
     `createRoomFor: member=${member.user.tag} lobby="${lobbyChannel.name}" ` +
-      `(${lobbyChannel.id}) parentCategory=${parentId ?? '(none)'}`,
+      `(${lobbyChannel.id}) parentCategory=${parentId ?? '(none)'} chosenLimit=${chosenLimit ?? '(none)'}`,
   );
 
   try {
@@ -338,9 +415,9 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null) {
       name: `${member.displayName}'s Channel`,
       type: ChannelType.GuildVoice,
       parent: parentId,
-      // Configured lobbies start at their minimum; otherwise the global
-      // default from /setlimit applies (0 = unlimited).
-      userLimit: lobbyCfg ? lobbyCfg.min : config.defaultUserLimit,
+      // A picked limit wins; otherwise a configured lobby starts at its
+      // minimum, or the global default from /setlimit applies (0 = unlimited).
+      userLimit: chosenLimit ?? (lobbyCfg ? lobbyCfg.min : config.defaultUserLimit),
       permissionOverwrites: [
         {
           // Give the room owner full control over their channel.
@@ -441,10 +518,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   // 1) A user joined a lobby channel => create a new room for them.
   //    Configured limit lobbies take their own min/max; the legacy single
   //    lobby (JOIN_TO_CREATE_CHANNEL_ID) uses the global default limit.
+  //    Bounded lobbies (max > 0) do NOT auto-create here — the member must
+  //    pick a size from the lobby's create-picker instead (see
+  //    handleCreatePick), so they end up with exactly the size they chose.
   if (newState.member && newState.channelId && oldState.channelId !== newState.channelId) {
     const lobbyCfg = lobbies.get(newState.channelId);
     if (lobbyCfg) {
-      await createRoomFor(newState.member, newState.channel, lobbyCfg);
+      if (lobbyCfg.max === 0) {
+        await createRoomFor(newState.member, newState.channel, lobbyCfg);
+      }
     } else if (newState.channelId === JOIN_TO_CREATE_CHANNEL_ID) {
       await createRoomFor(newState.member, newState.channel);
     }
@@ -465,6 +547,9 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (interaction.isModalSubmit() && interaction.customId.startsWith('vc:')) {
       return await handlePanelModal(interaction);
+    }
+    if (interaction.isStringSelectMenu() && interaction.customId === 'vc:createPick') {
+      return await handleCreatePick(interaction);
     }
     if (
       (interaction.isUserSelectMenu() || interaction.isStringSelectMenu()) &&
@@ -755,6 +840,33 @@ async function handlePanelModal(interaction) {
     await channel.setName(value);
     return interaction.reply({ content: `Room renamed to "${value}".`, ephemeral: true });
   }
+}
+
+/**
+ * Handles a selection on a bounded lobby's create-size picker: the member
+ * must be currently connected to that exact lobby channel (so they can be
+ * moved into the room this creates), then the room is created with exactly
+ * the size they picked.
+ */
+async function handleCreatePick(interaction) {
+  const lobbyCfg = lobbies.get(interaction.channelId);
+  if (!lobbyCfg) {
+    return interaction.reply({ content: 'This picker is no longer configured.', ephemeral: true });
+  }
+  if (interaction.member?.voice?.channelId !== interaction.channelId) {
+    return interaction.reply({
+      content: 'Join this voice channel first, then pick your room size here.',
+      ephemeral: true,
+    });
+  }
+  const limit = Number.parseInt(interaction.values[0], 10);
+  const room = await createRoomFor(interaction.member, interaction.channel, lobbyCfg, limit);
+  return interaction.reply({
+    content: room
+      ? `Room created with a limit of ${limit} — you have been moved into it.`
+      : 'Failed to create the room. Check the bot permissions.',
+    ephemeral: true,
+  });
 }
 
 async function handlePanelSelect(interaction) {
