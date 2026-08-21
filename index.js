@@ -392,8 +392,15 @@ async function ensurePanel(guild, categoryId, boundedLobbiesInCategory = []) {
     try {
       await settingsChannel.messages.fetch(saved.messageId);
       return; // Panel already posted and still there.
-    } catch {
-      // Message was deleted; fall through and repost it.
+    } catch (err) {
+      // Only a genuine 10008 "Unknown Message" means it was actually
+      // deleted — repost in that case. Any other error (a transient
+      // network blip, rate limit, etc.) must NOT fall through to posting a
+      // duplicate; skip this cycle and let the next self-heal tick retry.
+      if (err?.code !== 10008) {
+        console.warn(`Panel fetch check failed for category ${categoryId} (will retry later):`, err?.message ?? err);
+        return;
+      }
     }
   }
 
