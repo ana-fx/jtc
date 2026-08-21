@@ -80,10 +80,11 @@ const tempChannels = new Map();
 // in clientReady and reused by the periodic panel self-heal check.
 const categoryGuilds = new Map();
 
-// lobbyChannelId -> { channel, lobbyCfg }, for every bounded lobby (max > 0).
-// Populated once in clientReady and reused by the periodic create-picker
-// self-heal check.
-const boundedLobbies = new Map();
+// categoryId -> [{ channel, lobbyCfg }, ...], the bounded lobbies (max > 0)
+// living in each category — their create-size pickers get folded into that
+// category's one combined panel message. Populated once in clientReady and
+// reused by the periodic self-heal check.
+const categoryBoundedLobbies = new Map();
 
 // Writes the current room list to disk so it survives a restart.
 function persistRooms() {
@@ -150,46 +151,37 @@ client.once('clientReady', async () => {
   persistRooms(); // prune any that were deleted while offline
   console.log(`Adopted ${tempChannels.size} room(s) from the previous session.`);
 
-  // Every category we create rooms in needs its one static control panel in
-  // its #pengaturan channel. Computed once here (channels don't change
-  // category at runtime) and reused by the periodic re-check below, so a
-  // panel someone deletes by hand gets reposted within a minute instead of
+  // Every category we create rooms in needs its one combined panel message
+  // (control buttons + any bounded lobbies' create-size pickers) in its
+  // #pengaturan channel. Computed once here (channels don't change category
+  // at runtime) and reused by the periodic re-check below, so a panel
+  // someone deletes by hand gets reposted within a minute instead of
   // needing a bot restart.
   if (JOIN_TO_CREATE_CHANNEL_ID) {
     const lobby = client.channels.cache.get(JOIN_TO_CREATE_CHANNEL_ID);
     const categoryId = CATEGORY_ID || lobby?.parentId;
     if (lobby && categoryId) categoryGuilds.set(categoryId, lobby.guild);
   }
-  for (const lobbyId of lobbies.keys()) {
+  for (const [lobbyId, lobbyCfg] of lobbies) {
     const lobby = client.channels.cache.get(lobbyId);
-    if (lobby?.parentId) categoryGuilds.set(lobby.parentId, lobby.guild);
+    if (!lobby?.parentId) continue;
+    categoryGuilds.set(lobby.parentId, lobby.guild);
+    if (lobbyCfg.max > 0) {
+      const list = categoryBoundedLobbies.get(lobby.parentId) ?? [];
+      list.push({ channel: lobby, lobbyCfg });
+      categoryBoundedLobbies.set(lobby.parentId, list);
+    }
   }
   for (const [categoryId, guild] of categoryGuilds) {
-    await ensureSettingsPanel(guild, categoryId);
+    await ensurePanel(guild, categoryId, categoryBoundedLobbies.get(categoryId));
   }
 
-  // Bounded lobbies (max > 0) get a "choose your room size" picker in the
-  // category's #pengaturan channel instead of auto-creating on join.
-  for (const [lobbyId, lobbyCfg] of lobbies) {
-    if (lobbyCfg.max === 0) continue;
-    const lobby = client.channels.cache.get(lobbyId);
-    if (lobby?.parentId) boundedLobbies.set(lobbyId, { channel: lobby, lobbyCfg, categoryId: lobby.parentId });
-  }
-  for (const { channel, lobbyCfg, categoryId } of boundedLobbies.values()) {
-    await ensureCreatePicker(channel.guild, categoryId, channel, lobbyCfg);
-  }
-
-  // Start the periodic sweeper (empty-room cleanup + panel/picker self-heal).
+  // Start the periodic sweeper (empty-room cleanup + panel self-heal).
   setInterval(() => {
     sweepRooms().catch((err) => console.error('Sweep error:', err));
     for (const [categoryId, guild] of categoryGuilds) {
-      ensureSettingsPanel(guild, categoryId).catch((err) =>
+      ensurePanel(guild, categoryId, categoryBoundedLobbies.get(categoryId)).catch((err) =>
         console.error(`Panel re-check failed for category ${categoryId}:`, err),
-      );
-    }
-    for (const { channel, lobbyCfg, categoryId } of boundedLobbies.values()) {
-      ensureCreatePicker(channel.guild, categoryId, channel, lobbyCfg).catch((err) =>
-        console.error(`Create-picker re-check failed for "${channel.name}":`, err),
       );
     }
   }, SWEEP_INTERVAL_MS);
@@ -246,13 +238,21 @@ async function sweepRooms() {
 }
 
 /**
- * Builds the ONE static control-panel message posted per category. It does
- * not represent any specific room — every button resolves "the room" at
- * click time from the voice channel the clicking member is currently
- * connected to, so this same message works for every room in the category
- * and never needs to be edited or reposted per room.
+ * Builds the ONE static message posted per category: the room-control
+ * buttons, plus (if any bounded lobbies live in this category) a
+ * "choose your room size" select menu per lobby. It does not represent any
+ * specific room — every button resolves "the room" at click time from the
+ * voice channel the clicking member is currently connected to, so this same
+ * message works for every room in the category and never needs to be
+ * edited or reposted per room.
+ *
+ * A bounded lobby's select menu embeds its channel id in the customId
+ * (vc:createPick:<lobbyChannelId>) since it can't be inferred from the
+ * channel the interaction came from — this message lives in #pengaturan,
+ * not in the lobby itself, and a category could in principle hold more than
+ * one bounded lobby's picker.
  */
-function buildPanel() {
+function buildPanel(boundedLobbiesInCategory = []) {
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle('Room Controls')
@@ -280,16 +280,42 @@ function buildPanel() {
     new ButtonBuilder().setCustomId('vc:invite').setLabel('Invite').setEmoji('🔗').setStyle(ButtonStyle.Secondary),
   );
 
-  return { embeds: [embed], components: [row1, row2, row3] };
+  const embeds = [embed];
+  const components = [row1, row2, row3];
+
+  for (const { channel: lobbyChannel, lobbyCfg } of boundedLobbiesInCategory) {
+    embeds.push(
+      new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle(`Create Your Room — ${lobbyChannel.name}`)
+        .setDescription(
+          'Choose how many people can join your room, then it will be ' +
+            `created and you will be moved into it automatically. **You ` +
+            `must be connected to <#${lobbyChannel.id}>** while picking.`,
+        ),
+    );
+
+    const options = [];
+    for (let n = lobbyCfg.min; n <= lobbyCfg.max; n++) {
+      options.push({ label: `${n} user${n === 1 ? '' : 's'}`, value: String(n) });
+    }
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`vc:createPick:${lobbyChannel.id}`)
+      .setPlaceholder(`Select a room size for ${lobbyChannel.name}`)
+      .addOptions(options);
+    components.push(new ActionRowBuilder().addComponents(select));
+  }
+
+  return { embeds, components };
 }
 
 /**
- * Posts the static control panel in a category's #pengaturan channel if it
- * isn't already there (checked against the last known message id, re-posting
- * if that message was deleted). Safe to call repeatedly — a no-op once the
- * panel exists.
+ * Posts the one combined panel (control buttons + any bounded lobbies'
+ * create-size pickers) in a category's #pengaturan channel if it isn't
+ * already there, re-posting if that message was deleted. Safe to call
+ * repeatedly — a no-op once the panel exists.
  */
-async function ensureSettingsPanel(guild, categoryId) {
+async function ensurePanel(guild, categoryId, boundedLobbiesInCategory = []) {
   const settingsChannel = findSettingsChannel(guild, categoryId);
   if (!settingsChannel) {
     console.warn(
@@ -310,81 +336,12 @@ async function ensureSettingsPanel(guild, categoryId) {
   }
 
   try {
-    const message = await settingsChannel.send(buildPanel());
+    const message = await settingsChannel.send(buildPanel(boundedLobbiesInCategory));
     config.panelMessages = { ...(config.panelMessages ?? {}), [categoryId]: { channelId: settingsChannel.id, messageId: message.id } };
     saveConfig(config);
-    console.log(`Posted the static control panel in "${settingsChannel.name}" for category ${categoryId}`);
+    console.log(`Posted the control panel in "${settingsChannel.name}" for category ${categoryId}`);
   } catch (err) {
     console.error(`Failed to post the control panel in category ${categoryId}:`, err);
-  }
-}
-
-/**
- * Builds the "choose your room size" picker for a bounded lobby (one with a
- * finite max, e.g. min 1 / max 3): a select menu listing every user-limit
- * value in [min, max]. Posted in the category's #pengaturan channel, so the
- * lobby's id is embedded in the customId (vc:createPick:<lobbyChannelId>) —
- * unlike the room-control panel, this can't be inferred from which channel
- * the interaction came from, since #pengaturan may host more than one
- * lobby's picker.
- */
-function buildCreatePicker(lobbyChannel, lobbyCfg) {
-  const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle(`Create Your Room — ${lobbyChannel.name}`)
-    .setDescription(
-      'Choose how many people can join your room, then it will be created ' +
-        `and you will be moved into it automatically. **You must be ` +
-        `connected to <#${lobbyChannel.id}>** while picking.`,
-    );
-
-  const options = [];
-  for (let n = lobbyCfg.min; n <= lobbyCfg.max; n++) {
-    options.push({ label: `${n} user${n === 1 ? '' : 's'}`, value: String(n) });
-  }
-  const select = new StringSelectMenuBuilder()
-    .setCustomId(`vc:createPick:${lobbyChannel.id}`)
-    .setPlaceholder('Select a room size')
-    .addOptions(options);
-
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] };
-}
-
-/**
- * Posts the create-size picker for a bounded lobby into the category's
- * #pengaturan channel (same place as the room-control panel) if it isn't
- * already there, re-posting if it was deleted. Mirrors ensureSettingsPanel.
- */
-async function ensureCreatePicker(guild, categoryId, lobbyChannel, lobbyCfg) {
-  const settingsChannel = findSettingsChannel(guild, categoryId);
-  if (!settingsChannel) {
-    console.warn(
-      `WARNING: no text channel with "pengaturan" in its name found in category ${categoryId}; ` +
-        `the create-size picker for "${lobbyChannel.name}" was not posted.`,
-    );
-    return;
-  }
-
-  const saved = config.createPickers?.[lobbyChannel.id];
-  if (saved?.channelId === settingsChannel.id) {
-    try {
-      await settingsChannel.messages.fetch(saved.messageId);
-      return; // Picker already posted and still there.
-    } catch {
-      // Message was deleted; fall through and repost it.
-    }
-  }
-
-  try {
-    const message = await settingsChannel.send(buildCreatePicker(lobbyChannel, lobbyCfg));
-    config.createPickers = {
-      ...(config.createPickers ?? {}),
-      [lobbyChannel.id]: { channelId: settingsChannel.id, messageId: message.id },
-    };
-    saveConfig(config);
-    console.log(`Posted the create-size picker for "${lobbyChannel.name}" in "${settingsChannel.name}"`);
-  } catch (err) {
-    console.error(`Failed to post the create-size picker for "${lobbyChannel.name}":`, err);
   }
 }
 
