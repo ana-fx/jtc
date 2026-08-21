@@ -76,7 +76,7 @@ When you see `Logged in as ...`, the bot is active. Try joining the lobby channe
 ## How It Works
 
 - **`index.js`** — listens for the `voiceStateUpdate` event. When someone joins the lobby, the bot creates a new channel and moves them into it. When a bot-created channel becomes empty, it is deleted.
-- **Room controls** — when a room is created (via a bounded lobby's size picker or `/voice`), the bot posts a persistent status embed and action buttons (Lock, Hide, Rename, Kick, Ban, Permit, Claim, Invite) directly in the room's own text chat. There's no Limit button — the limit is fixed at creation time (picked from the lobby's range, or set via `/setlimit` for the legacy single-lobby setup) and isn't editable afterward. Each button embeds the room's channel id in its customId (`vc:<action>:<roomId>`).
+- **Room controls** — when a room is created, the bot posts a persistent status embed and action buttons (Lock, Hide, Rename, Kick, Ban, Permit, Claim, Invite) directly in the room's own text chat. A **Limit** button is also included, but only for rooms whose size wasn't fixed by a bounded lobby's picker: rooms from an unbounded lobby (e.g. Family Room, auto-created at its minimum), `/voice`, or the legacy single-lobby setup can still have their limit changed afterward; rooms created by explicitly picking a size from a bounded lobby (e.g. Bedroom/Library) have that exact limit locked in and get no Limit button. Each button embeds the room's channel id in its customId (`vc:<action>:<roomId>`).
 - Rooms are tracked only while the bot is running. **If the bot restarts**, previously created rooms are no longer tracked (and won't be auto-deleted). For permanent tracking, this would need a database (can be added later).
 
 ## Deployment

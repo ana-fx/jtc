@@ -298,8 +298,14 @@ function buildPanel(boundedLobbiesInCategory = []) {
  * (vc:<action>:<roomId>) so the follow-up interaction (a button click,
  * modal submit, or select choice) resolves back to this exact room via
  * resolveRoomById. Posted once as a persistent message in the room's own
- * text chat when it's created (see createRoomFor) — there's no Limit
- * button since the limit is fixed at creation time and isn't editable.
+ * text chat when it's created (see createRoomFor).
+ *
+ * The Limit button only appears when room.max === 0 — i.e. the room came
+ * from an unbounded lobby (auto-created with just a default minimum, e.g.
+ * Ruang Keluarga) or has no lobby config at all (/voice, legacy single
+ * lobby). A room created via a BOUNDED lobby's size picker (room.max > 0,
+ * e.g. Kamar Tidur/Perpustakaan) already has the exact limit the owner
+ * explicitly chose, so it's fixed and Limit is omitted.
  */
 function buildRoomControls(channel, room) {
   const everyone = channel.permissionOverwrites.cache.get(channel.guild.id);
@@ -327,7 +333,7 @@ function buildRoomControls(channel, room) {
     });
   }
 
-  const row1 = new ActionRowBuilder().addComponents(
+  const row1Buttons = [
     new ButtonBuilder()
       .setCustomId(`vc:lock:${channel.id}`)
       .setLabel(isLocked ? 'Unlock' : 'Lock')
@@ -338,8 +344,18 @@ function buildRoomControls(channel, room) {
       .setLabel(isHidden ? 'Unhide' : 'Hide')
       .setEmoji(isHidden ? '👁️' : '🙈')
       .setStyle(ButtonStyle.Secondary),
+  ];
+  // Only editable when this room's limit wasn't fixed by a bounded lobby's
+  // size picker (see the doc comment above).
+  if ((room.max ?? 0) === 0) {
+    row1Buttons.push(
+      new ButtonBuilder().setCustomId(`vc:limit:${channel.id}`).setLabel('Limit').setEmoji('🔢').setStyle(ButtonStyle.Secondary),
+    );
+  }
+  row1Buttons.push(
     new ButtonBuilder().setCustomId(`vc:rename:${channel.id}`).setLabel('Rename').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
   );
+  const row1 = new ActionRowBuilder().addComponents(row1Buttons);
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`vc:kick:${channel.id}`).setLabel('Kick').setEmoji('👢').setStyle(ButtonStyle.Secondary),
@@ -739,6 +755,27 @@ async function handlePanelButton(interaction) {
       }
       return interaction.update(buildRoomControls(channel, room));
     }
+    case 'limit': {
+      // Defense in depth: the button itself is only shown when this is
+      // true (see buildRoomControls), but re-check server-side in case of
+      // a stale UI.
+      if ((room.max ?? 0) > 0) {
+        return interaction.reply({
+          content: 'This room type has a fixed limit chosen at creation and cannot be changed.',
+          ephemeral: true,
+        });
+      }
+      const min = room.min ?? 0;
+      const label = min > 0 ? `Max users (minimum ${min})` : 'Max users (0-99, 0 = unlimited)';
+      const modal = new ModalBuilder().setCustomId(`vc:limitModal:${channel.id}`).setTitle('Set user limit');
+      const input = new TextInputBuilder()
+        .setCustomId('value')
+        .setLabel(label)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal);
+    }
     case 'rename': {
       const modal = new ModalBuilder().setCustomId(`vc:renameModal:${channel.id}`).setTitle('Rename room');
       const input = new TextInputBuilder()
@@ -835,6 +872,28 @@ async function handlePanelModal(interaction) {
     return interaction.reply({ content: 'Only the room owner can do that.', ephemeral: true });
   }
   const value = interaction.fields.getTextInputValue('value').trim();
+
+  if (modalName === 'limitModal') {
+    if ((room.max ?? 0) > 0) {
+      return interaction.reply({
+        content: 'This room type has a fixed limit chosen at creation and cannot be changed.',
+        ephemeral: true,
+      });
+    }
+    const n = Number.parseInt(value, 10);
+    if (Number.isNaN(n) || n < 0 || n > 99) {
+      return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
+    }
+    const min = room.min ?? 0;
+    if (min > 0 && n !== 0 && n < min) {
+      return interaction.reply({
+        content: `This room type requires a limit of at least ${min} (or 0 for unlimited).`,
+        ephemeral: true,
+      });
+    }
+    await channel.setUserLimit(n);
+    return interaction.update(buildRoomControls(channel, room));
+  }
 
   if (modalName === 'renameModal') {
     await channel.setName(value);
