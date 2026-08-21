@@ -168,15 +168,15 @@ client.once('clientReady', async () => {
     await ensureSettingsPanel(guild, categoryId);
   }
 
-  // Bounded lobbies (max > 0) get a "choose your room size" picker in their
-  // own chat instead of auto-creating on join.
+  // Bounded lobbies (max > 0) get a "choose your room size" picker in the
+  // category's #pengaturan channel instead of auto-creating on join.
   for (const [lobbyId, lobbyCfg] of lobbies) {
     if (lobbyCfg.max === 0) continue;
     const lobby = client.channels.cache.get(lobbyId);
-    if (lobby) boundedLobbies.set(lobbyId, { channel: lobby, lobbyCfg });
+    if (lobby?.parentId) boundedLobbies.set(lobbyId, { channel: lobby, lobbyCfg, categoryId: lobby.parentId });
   }
-  for (const { channel, lobbyCfg } of boundedLobbies.values()) {
-    await ensureCreatePicker(channel, lobbyCfg);
+  for (const { channel, lobbyCfg, categoryId } of boundedLobbies.values()) {
+    await ensureCreatePicker(channel.guild, categoryId, channel, lobbyCfg);
   }
 
   // Start the periodic sweeper (empty-room cleanup + panel/picker self-heal).
@@ -187,8 +187,8 @@ client.once('clientReady', async () => {
         console.error(`Panel re-check failed for category ${categoryId}:`, err),
       );
     }
-    for (const { channel, lobbyCfg } of boundedLobbies.values()) {
-      ensureCreatePicker(channel, lobbyCfg).catch((err) =>
+    for (const { channel, lobbyCfg, categoryId } of boundedLobbies.values()) {
+      ensureCreatePicker(channel.guild, categoryId, channel, lobbyCfg).catch((err) =>
         console.error(`Create-picker re-check failed for "${channel.name}":`, err),
       );
     }
@@ -322,16 +322,20 @@ async function ensureSettingsPanel(guild, categoryId) {
 /**
  * Builds the "choose your room size" picker for a bounded lobby (one with a
  * finite max, e.g. min 1 / max 3): a select menu listing every user-limit
- * value in [min, max]. Posted once in the lobby voice channel's own chat.
+ * value in [min, max]. Posted in the category's #pengaturan channel, so the
+ * lobby's id is embedded in the customId (vc:createPick:<lobbyChannelId>) —
+ * unlike the room-control panel, this can't be inferred from which channel
+ * the interaction came from, since #pengaturan may host more than one
+ * lobby's picker.
  */
-function buildCreatePicker(lobbyCfg) {
+function buildCreatePicker(lobbyChannel, lobbyCfg) {
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('Create Your Room')
+    .setTitle(`Create Your Room — ${lobbyChannel.name}`)
     .setDescription(
       'Choose how many people can join your room, then it will be created ' +
-        'and you will be moved into it automatically. **You must stay ' +
-        'connected to this voice channel** while picking.',
+        `and you will be moved into it automatically. **You must be ` +
+        `connected to <#${lobbyChannel.id}>** while picking.`,
     );
 
   const options = [];
@@ -339,7 +343,7 @@ function buildCreatePicker(lobbyCfg) {
     options.push({ label: `${n} user${n === 1 ? '' : 's'}`, value: String(n) });
   }
   const select = new StringSelectMenuBuilder()
-    .setCustomId('vc:createPick')
+    .setCustomId(`vc:createPick:${lobbyChannel.id}`)
     .setPlaceholder('Select a room size')
     .addOptions(options);
 
@@ -347,14 +351,24 @@ function buildCreatePicker(lobbyCfg) {
 }
 
 /**
- * Posts the create-size picker in a bounded lobby's own chat if it isn't
+ * Posts the create-size picker for a bounded lobby into the category's
+ * #pengaturan channel (same place as the room-control panel) if it isn't
  * already there, re-posting if it was deleted. Mirrors ensureSettingsPanel.
  */
-async function ensureCreatePicker(lobbyChannel, lobbyCfg) {
+async function ensureCreatePicker(guild, categoryId, lobbyChannel, lobbyCfg) {
+  const settingsChannel = findSettingsChannel(guild, categoryId);
+  if (!settingsChannel) {
+    console.warn(
+      `WARNING: no text channel with "pengaturan" in its name found in category ${categoryId}; ` +
+        `the create-size picker for "${lobbyChannel.name}" was not posted.`,
+    );
+    return;
+  }
+
   const saved = config.createPickers?.[lobbyChannel.id];
-  if (saved?.channelId === lobbyChannel.id) {
+  if (saved?.channelId === settingsChannel.id) {
     try {
-      await lobbyChannel.messages.fetch(saved.messageId);
+      await settingsChannel.messages.fetch(saved.messageId);
       return; // Picker already posted and still there.
     } catch {
       // Message was deleted; fall through and repost it.
@@ -362,15 +376,15 @@ async function ensureCreatePicker(lobbyChannel, lobbyCfg) {
   }
 
   try {
-    const message = await lobbyChannel.send(buildCreatePicker(lobbyCfg));
+    const message = await settingsChannel.send(buildCreatePicker(lobbyChannel, lobbyCfg));
     config.createPickers = {
       ...(config.createPickers ?? {}),
-      [lobbyChannel.id]: { channelId: lobbyChannel.id, messageId: message.id },
+      [lobbyChannel.id]: { channelId: settingsChannel.id, messageId: message.id },
     };
     saveConfig(config);
-    console.log(`Posted the create-size picker in "${lobbyChannel.name}"`);
+    console.log(`Posted the create-size picker for "${lobbyChannel.name}" in "${settingsChannel.name}"`);
   } catch (err) {
-    console.error(`Failed to post the create-size picker in "${lobbyChannel.name}":`, err);
+    console.error(`Failed to post the create-size picker for "${lobbyChannel.name}":`, err);
   }
 }
 
@@ -548,7 +562,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('vc:')) {
       return await handlePanelModal(interaction);
     }
-    if (interaction.isStringSelectMenu() && interaction.customId === 'vc:createPick') {
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('vc:createPick:')) {
       return await handleCreatePick(interaction);
     }
     if (
@@ -843,24 +857,31 @@ async function handlePanelModal(interaction) {
 }
 
 /**
- * Handles a selection on a bounded lobby's create-size picker: the member
- * must be currently connected to that exact lobby channel (so they can be
- * moved into the room this creates), then the room is created with exactly
- * the size they picked.
+ * Handles a selection on a bounded lobby's create-size picker (posted in
+ * #pengaturan, so the target lobby is read from the customId — see
+ * buildCreatePicker — rather than from the channel the interaction came
+ * from). The member must be currently connected to that exact lobby channel
+ * (so they can be moved into the room this creates), then the room is
+ * created with exactly the size they picked.
  */
 async function handleCreatePick(interaction) {
-  const lobbyCfg = lobbies.get(interaction.channelId);
+  const lobbyId = interaction.customId.split(':')[2];
+  const lobbyCfg = lobbies.get(lobbyId);
   if (!lobbyCfg) {
     return interaction.reply({ content: 'This picker is no longer configured.', ephemeral: true });
   }
-  if (interaction.member?.voice?.channelId !== interaction.channelId) {
+  if (interaction.member?.voice?.channelId !== lobbyId) {
     return interaction.reply({
-      content: 'Join this voice channel first, then pick your room size here.',
+      content: `Join <#${lobbyId}> first, then pick your room size here.`,
       ephemeral: true,
     });
   }
+  const lobbyChannel = await interaction.guild.channels.fetch(lobbyId).catch(() => null);
+  if (!lobbyChannel) {
+    return interaction.reply({ content: 'That lobby channel no longer exists.', ephemeral: true });
+  }
   const limit = Number.parseInt(interaction.values[0], 10);
-  const room = await createRoomFor(interaction.member, interaction.channel, lobbyCfg, limit);
+  const room = await createRoomFor(interaction.member, lobbyChannel, lobbyCfg, limit);
   return interaction.reply({
     content: room
       ? `Room created with a limit of ${limit} — you have been moved into it.`
