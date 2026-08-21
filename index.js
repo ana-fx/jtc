@@ -493,7 +493,14 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null, chosenLimit 
 
     // Move the member into the new room (if still connected to voice).
     if (member.voice.channel) {
-      await member.voice.setChannel(channel);
+      try {
+        await member.voice.setChannel(channel);
+        console.log(`Moved ${member.user.tag} into "${channel.name}" (voice channel was "${member.voice.channel?.name}")`);
+      } catch (err) {
+        console.error(`Failed to move ${member.user.tag} into "${channel.name}":`, err);
+      }
+    } else {
+      console.warn(`${member.user.tag} was not connected to voice at room-creation time; not moved.`);
     }
 
     // No per-room panel to post: the category's one combined panel (posted
@@ -522,6 +529,11 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null, chosenLimit 
  * Deletes the channel if it was created by the bot and is now empty.
  */
 async function deleteIfEmpty(channel) {
+  console.log(
+    `deleteIfEmpty check: channel="${channel?.name}" (${channel?.id}) ` +
+      `tracked=${channel ? tempChannels.has(channel.id) : 'n/a'} ` +
+      `members=${channel?.members?.size ?? 'n/a'}`,
+  );
   if (!channel || !tempChannels.has(channel.id)) return;
   if (channel.members.size > 0) return;
 
@@ -550,6 +562,12 @@ async function deleteIfEmpty(channel) {
 }
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
+  console.log(
+    `voiceStateUpdate: member=${newState.member?.user.tag ?? oldState.member?.user.tag} ` +
+      `old="${oldState.channel?.name ?? 'none'}" (${oldState.channelId ?? 'none'}) -> ` +
+      `new="${newState.channel?.name ?? 'none'}" (${newState.channelId ?? 'none'})`,
+  );
+
   // 1) A user joined a lobby channel => create a new room for them.
   //    Configured limit lobbies take their own min/max; the legacy single
   //    lobby (JOIN_TO_CREATE_CHANNEL_ID) uses the global default limit.
