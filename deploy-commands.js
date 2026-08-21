@@ -15,8 +15,7 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
 }
 
 const commands = [
-  new SlashCommandBuilder().setName('wh').setDescription('Go hunting for coins (has a cooldown)').toJSON(),
-  new SlashCommandBuilder().setName('wb').setDescription('Go into battle for coins (has a cooldown)').toJSON(),
+  new SlashCommandBuilder().setName('work').setDescription('Work for an hour and come back to claim your paycheck').toJSON(),
   new SlashCommandBuilder()
     .setName('balance')
     .setDescription('Check your (or someone else\'s) coin balance')

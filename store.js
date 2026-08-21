@@ -31,7 +31,7 @@ function save() {
 }
 
 // Returns (creating if needed) a user's record: { xp, level, coins,
-// lastMessageXpAt, lastWorkHuntAt, lastWorkBattleAt }.
+// lastMessageXpAt, lastWorkAt }.
 export function getUser(userId) {
   const users = load();
   if (!users[userId]) {
@@ -40,10 +40,12 @@ export function getUser(userId) {
       level: 1,
       coins: 0,
       lastMessageXpAt: 0,
-      lastWorkHuntAt: 0,
-      lastWorkBattleAt: 0,
+      lastWorkAt: 0,
     };
   }
+  // Backward compat: users created before /work replaced /wh + /wb won't
+  // have lastWorkAt yet.
+  if (users[userId].lastWorkAt === undefined) users[userId].lastWorkAt = 0;
   return users[userId];
 }
 

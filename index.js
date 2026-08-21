@@ -45,12 +45,9 @@ const config = loadConfig();
 const XP_PER_MINUTE_VOICE = 5; // XP per minute connected to a game room
 const XP_PER_MESSAGE = 3; // XP per eligible chat message in a game room
 const MESSAGE_XP_COOLDOWN_MS = 60 * 1000; // one XP-earning message per minute per user
-const WORK_HUNT_COOLDOWN_MS = 30 * 1000;
-const WORK_HUNT_MIN = 10;
-const WORK_HUNT_MAX = 50;
-const WORK_BATTLE_COOLDOWN_MS = 60 * 1000;
-const WORK_BATTLE_MIN = 20;
-const WORK_BATTLE_MAX = 100;
+const WORK_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+const WORK_MIN = 100;
+const WORK_MAX = 300;
 const EMPTY_GRACE_MS = 5 * 60 * 1000; // delete an empty game room after 5 minutes
 const TICK_INTERVAL_MS = 60 * 1000; // voice-XP + empty-room sweep cadence
 
@@ -600,38 +597,23 @@ async function handlePanelSelect(interaction) {
 async function handleSlashCommand(interaction) {
   const { commandName } = interaction;
 
-  if (commandName === 'wh') {
+  if (commandName === 'work') {
     const user = getUser(interaction.user.id);
     const now = Date.now();
-    const remaining = WORK_HUNT_COOLDOWN_MS - (now - user.lastWorkHuntAt);
+    const remaining = WORK_COOLDOWN_MS - (now - user.lastWorkAt);
     if (remaining > 0) {
+      const mins = Math.floor(remaining / 60000);
+      const secs = Math.ceil((remaining % 60000) / 1000);
       return interaction.reply({
-        content: `You can hunt again in ${Math.ceil(remaining / 1000)}s.`,
+        content: `You already worked recently — come back in ${mins}m ${secs}s to claim your next paycheck.`,
         ephemeral: true,
       });
     }
-    const earned = randomInt(WORK_HUNT_MIN, WORK_HUNT_MAX);
-    user.lastWorkHuntAt = now;
+    const earned = randomInt(WORK_MIN, WORK_MAX);
+    user.lastWorkAt = now;
     user.coins += earned;
     saveUsers();
-    return interaction.reply(`🔫 ${interaction.user} went hunting and found **${earned} coins**!`);
-  }
-
-  if (commandName === 'wb') {
-    const user = getUser(interaction.user.id);
-    const now = Date.now();
-    const remaining = WORK_BATTLE_COOLDOWN_MS - (now - user.lastWorkBattleAt);
-    if (remaining > 0) {
-      return interaction.reply({
-        content: `You can battle again in ${Math.ceil(remaining / 1000)}s.`,
-        ephemeral: true,
-      });
-    }
-    const earned = randomInt(WORK_BATTLE_MIN, WORK_BATTLE_MAX);
-    user.lastWorkBattleAt = now;
-    user.coins += earned;
-    saveUsers();
-    return interaction.reply(`⚔️ ${interaction.user} won a battle and earned **${earned} coins**!`);
+    return interaction.reply(`💼 ${interaction.user} worked for an hour and earned a paycheck of **${earned} coins**!`);
   }
 
   if (commandName === 'balance') {
