@@ -65,15 +65,19 @@ const client = new Client({
   ],
 });
 
-// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max }>.
-// emptySince is a timestamp (ms) since the room became empty, or null.
-// min/max define the allowed user-limit range (0 max = no upper bound).
+// Rooms created by the bot. Map<channelId, { ownerId, emptySince, min, max,
+// categoryId, name }>. emptySince is a timestamp (ms) since the room became
+// empty, or null. min/max define the allowed user-limit range (0 max = no
+// upper bound). categoryId groups rooms for the "Manage a Room" picker;
+// name is kept in sync with the channel's current name so that picker can
+// list rooms without an extra fetch per room.
 //
 // There is no per-room panel message to track: a single static control
 // panel is posted once per category (in its #pengaturan channel, see
-// ensureSettingsPanel) and every button/modal/select resolves "the room" by
-// looking at the voice channel the clicking member is currently connected
-// to — not by an id baked into the component.
+// ensurePanel). Clicking "Manage a Room" lists active rooms in that
+// category; picking one reveals the actual controls, with the room's id
+// embedded in their customIds — that's what ties a control action to a
+// specific room, not the channel the interaction started in.
 const tempChannels = new Map();
 
 // categoryId -> guild, for every category we create rooms in. Populated once
@@ -90,7 +94,13 @@ const categoryBoundedLobbies = new Map();
 function persistRooms() {
   const rooms = {};
   for (const [id, room] of tempChannels) {
-    rooms[id] = { ownerId: room.ownerId, min: room.min ?? 0, max: room.max ?? 0 };
+    rooms[id] = {
+      ownerId: room.ownerId,
+      min: room.min ?? 0,
+      max: room.max ?? 0,
+      categoryId: room.categoryId ?? null,
+      name: room.name ?? null,
+    };
   }
   saveRooms(rooms);
 }
@@ -141,6 +151,8 @@ client.once('clientReady', async () => {
           ownerId: record.ownerId,
           min: record.min ?? 0,
           max: record.max ?? 0,
+          categoryId: record.categoryId ?? channel.parentId ?? null,
+          name: record.name ?? channel.name,
           emptySince: channel.members.size === 0 ? Date.now() : null,
         });
       }
@@ -238,13 +250,13 @@ async function sweepRooms() {
 }
 
 /**
- * Builds the ONE static message posted per category: the room-control
- * buttons, plus (if any bounded lobbies live in this category) a
- * "choose your room size" select menu per lobby. It does not represent any
- * specific room — every button resolves "the room" at click time from the
- * voice channel the clicking member is currently connected to, so this same
- * message works for every room in the category and never needs to be
- * edited or reposted per room.
+ * Builds the ONE static message posted per category: a "Manage a Room"
+ * button, plus (if any bounded lobbies live in this category) a "choose
+ * your room size" select menu per lobby. It does not represent any specific
+ * room — clicking "Manage a Room" lists the category's currently active
+ * rooms (see handleManageRoomButton); picking one from that list is what
+ * reveals the actual per-room controls, so this message never needs to be
+ * edited or reposted as rooms come and go.
  *
  * A bounded lobby's select menu embeds its channel id in the customId
  * (vc:createPick:<lobbyChannelId>) since it can't be inferred from the
@@ -257,31 +269,19 @@ function buildPanel(boundedLobbiesInCategory = []) {
     .setColor(0x5865f2)
     .setTitle('Room Controls')
     .setDescription(
-      'Use the buttons below to manage the voice room **you are currently ' +
-        'connected to**. Most controls only work for the room owner. ' +
-        '**Claim** can be used by anyone in a room whose owner has left.',
+      'Click **Manage a Room** to pick one of the currently active rooms ' +
+        'in this category and get its controls (Lock, Hide, Limit, Rename, ' +
+        'Kick, Ban, Permit, Claim, Invite). Most controls only work for the ' +
+        "room's owner. **Claim** can be used by anyone on a room whose " +
+        'owner has left.',
     );
 
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('vc:lock').setLabel('Lock / Unlock').setEmoji('🔒').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('vc:hide').setLabel('Hide / Unhide').setEmoji('🙈').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('vc:limit').setLabel('Limit').setEmoji('🔢').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('vc:rename').setLabel('Rename').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
-  );
-
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('vc:kick').setLabel('Kick').setEmoji('👢').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('vc:ban').setLabel('Ban').setEmoji('🔨').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('vc:permit').setLabel('Permit').setEmoji('✅').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('vc:claim').setLabel('Claim').setEmoji('👑').setStyle(ButtonStyle.Secondary),
-  );
-
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('vc:invite').setLabel('Invite').setEmoji('🔗').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('vc:manageRoom').setLabel('Manage a Room').setEmoji('🎛️').setStyle(ButtonStyle.Primary),
   );
 
   const embeds = [embed];
-  const components = [row1, row2, row3];
+  const components = [row1];
 
   for (const { channel: lobbyChannel, lobbyCfg } of boundedLobbiesInCategory) {
     embeds.push(
@@ -307,6 +307,68 @@ function buildPanel(boundedLobbiesInCategory = []) {
   }
 
   return { embeds, components };
+}
+
+/**
+ * Builds the per-room controls shown after picking a room from "Manage a
+ * Room": a status embed for that specific room plus its action buttons,
+ * each with the room's id embedded in its customId (vc:<action>:<roomId>)
+ * so the follow-up interaction (a button click, modal submit, or select
+ * choice) resolves back to this exact room via resolveRoomById.
+ */
+function buildRoomControls(channel, room) {
+  const everyone = channel.permissionOverwrites.cache.get(channel.guild.id);
+  const isLocked = everyone?.deny.has(PermissionFlagsBits.Connect) ?? false;
+  const isHidden = everyone?.deny.has(PermissionFlagsBits.ViewChannel) ?? false;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(channel.name)
+    .addFields(
+      { name: 'Owner', value: `<@${room.ownerId}>`, inline: true },
+      { name: 'Status', value: isLocked ? 'Locked' : 'Public', inline: true },
+      { name: 'Visibility', value: isHidden ? 'Hidden' : 'Visible', inline: true },
+      {
+        name: 'User limit',
+        value: channel.userLimit === 0 ? 'Unlimited' : String(channel.userLimit),
+        inline: true,
+      },
+    );
+  if ((room.min ?? 0) > 0 || (room.max ?? 0) > 0) {
+    embed.addFields({
+      name: 'Allowed limit',
+      value: room.max === 0 ? `min ${room.min}` : `${room.min}-${room.max}`,
+      inline: true,
+    });
+  }
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`vc:lock:${channel.id}`)
+      .setLabel(isLocked ? 'Unlock' : 'Lock')
+      .setEmoji(isLocked ? '🔓' : '🔒')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`vc:hide:${channel.id}`)
+      .setLabel(isHidden ? 'Unhide' : 'Hide')
+      .setEmoji(isHidden ? '👁️' : '🙈')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`vc:limit:${channel.id}`).setLabel('Limit').setEmoji('🔢').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`vc:rename:${channel.id}`).setLabel('Rename').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`vc:kick:${channel.id}`).setLabel('Kick').setEmoji('👢').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`vc:ban:${channel.id}`).setLabel('Ban').setEmoji('🔨').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`vc:permit:${channel.id}`).setLabel('Permit').setEmoji('✅').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`vc:claim:${channel.id}`).setLabel('Claim').setEmoji('👑').setStyle(ButtonStyle.Secondary),
+  );
+
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`vc:invite:${channel.id}`).setLabel('Invite').setEmoji('🔗').setStyle(ButtonStyle.Secondary),
+  );
+
+  return { content: '', embeds: [embed], components: [row1, row2, row3] };
 }
 
 /**
@@ -434,15 +496,17 @@ async function createRoomFor(member, lobbyChannel, lobbyCfg = null, chosenLimit 
       await member.voice.setChannel(channel);
     }
 
-    // No per-room panel to post: the category's one static panel (posted at
-    // startup by ensureSettingsPanel) already covers this room too, since
-    // its buttons resolve "the room" from the clicking member's current
-    // voice channel.
+    // No per-room panel to post: the category's one combined panel (posted
+    // at startup by ensurePanel) already covers this room too — "Manage a
+    // Room" lists it by categoryId/name and its controls resolve back to it
+    // by channel id once picked.
     tempChannels.set(channel.id, {
       ownerId: member.id,
       emptySince: null,
       min: lobbyCfg?.min ?? 0,
       max: lobbyCfg?.max ?? 0,
+      categoryId: parentId,
+      name: channel.name,
     });
     persistRooms();
 
@@ -513,6 +577,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
+    if (interaction.isButton() && interaction.customId === 'vc:manageRoom') {
+      return await handleManageRoomButton(interaction);
+    }
     if (interaction.isButton() && interaction.customId.startsWith('vc:')) {
       return await handlePanelButton(interaction);
     }
@@ -521,6 +588,9 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith('vc:createPick:')) {
       return await handleCreatePick(interaction);
+    }
+    if (interaction.isStringSelectMenu() && interaction.customId === 'vc:manageRoomSelect') {
+      return await handleManageRoomSelect(interaction);
     }
     if (
       (interaction.isUserSelectMenu() || interaction.isStringSelectMenu()) &&
@@ -543,15 +613,52 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Resolves "the room" for a panel interaction: the voice channel the
-// clicking member is currently connected to, if it's one of our rooms. The
-// panel is a single static message shared by every room in the category, so
-// this — not an id embedded in the component — is what ties an interaction
-// to a specific room.
-function getMemberRoom(interaction) {
-  const channel = interaction.member?.voice?.channel;
-  if (!channel || !tempChannels.has(channel.id)) return null;
-  return { channel, room: tempChannels.get(channel.id) };
+// Resolves a room by its channel id (embedded in a control's customId —
+// see buildRoomControls), fetching the channel fresh so it reflects the
+// current name/permissions rather than a stale cache entry.
+async function resolveRoomById(roomId, guild) {
+  if (!roomId || !tempChannels.has(roomId)) return null;
+  const channel = await guild.channels.fetch(roomId).catch(() => null);
+  if (!channel) return null;
+  return { channel, room: tempChannels.get(roomId) };
+}
+
+/**
+ * Handles the "Manage a Room" button: lists every currently active room in
+ * this category (derived from the #pengaturan channel's own category) as a
+ * select menu, so the member can pick which one to get controls for.
+ */
+async function handleManageRoomButton(interaction) {
+  const categoryId = interaction.channel?.parentId;
+  const roomsInCategory = [...tempChannels.entries()].filter(([, room]) => room.categoryId === categoryId);
+  if (roomsInCategory.length === 0) {
+    return interaction.reply({ content: 'There are no active rooms in this category right now.', ephemeral: true });
+  }
+  const options = roomsInCategory
+    .slice(-25)
+    .map(([id, room]) => ({ label: room.name ?? 'Room', value: id }));
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('vc:manageRoomSelect')
+    .setPlaceholder('Select a room to manage')
+    .addOptions(options);
+  return interaction.reply({
+    content: 'Choose which room to manage:',
+    components: [new ActionRowBuilder().addComponents(select)],
+    ephemeral: true,
+  });
+}
+
+/**
+ * Handles picking a room from the "Manage a Room" list: replaces the
+ * ephemeral message with that room's status embed and control buttons.
+ */
+async function handleManageRoomSelect(interaction) {
+  const roomId = interaction.values[0];
+  const info = await resolveRoomById(roomId, interaction.guild);
+  if (!info) {
+    return interaction.update({ content: 'That room no longer exists.', embeds: [], components: [] });
+  }
+  return interaction.update(buildRoomControls(info.channel, info.room));
 }
 
 // Dumps the channel's current permission overwrites and the change about to
@@ -617,13 +724,10 @@ async function handleSlashCommand(interaction) {
 }
 
 async function handlePanelButton(interaction) {
-  const action = interaction.customId.split(':')[1];
-  const info = getMemberRoom(interaction);
+  const [, action, roomId] = interaction.customId.split(':');
+  const info = await resolveRoomById(roomId, interaction.guild);
   if (!info) {
-    return interaction.reply({
-      content: "You're not currently connected to one of your rooms. Join your voice room first.",
-      ephemeral: true,
-    });
+    return interaction.update({ content: 'That room no longer exists.', embeds: [], components: [] });
   }
   const { channel, room } = info;
   const everyoneId = channel.guild.id;
@@ -647,7 +751,7 @@ async function handlePanelButton(interaction) {
         logOverwriteFailure(channel, 'lock', err);
         throw err;
       }
-      return interaction.reply({ content: locked ? 'Room unlocked.' : 'Room locked.', ephemeral: true });
+      return interaction.update(buildRoomControls(channel, room));
     }
     case 'hide': {
       const hidden =
@@ -659,7 +763,7 @@ async function handlePanelButton(interaction) {
         logOverwriteFailure(channel, 'hide', err);
         throw err;
       }
-      return interaction.reply({ content: hidden ? 'Room unhidden.' : 'Room hidden.', ephemeral: true });
+      return interaction.update(buildRoomControls(channel, room));
     }
     case 'limit': {
       const min = room.min ?? 0;
@@ -672,7 +776,7 @@ async function handlePanelButton(interaction) {
       } else {
         label = `Max users (${min}-${max})`;
       }
-      const modal = new ModalBuilder().setCustomId('vc:limitModal').setTitle('Set user limit');
+      const modal = new ModalBuilder().setCustomId(`vc:limitModal:${channel.id}`).setTitle('Set user limit');
       const input = new TextInputBuilder()
         .setCustomId('value')
         .setLabel(label)
@@ -682,7 +786,7 @@ async function handlePanelButton(interaction) {
       return interaction.showModal(modal);
     }
     case 'rename': {
-      const modal = new ModalBuilder().setCustomId('vc:renameModal').setTitle('Rename room');
+      const modal = new ModalBuilder().setCustomId(`vc:renameModal:${channel.id}`).setTitle('Rename room');
       const input = new TextInputBuilder()
         .setCustomId('value')
         .setLabel('New room name')
@@ -705,7 +809,7 @@ async function handlePanelButton(interaction) {
         .first(25)
         .map((m) => ({ label: m.displayName, value: m.id }));
       const select = new StringSelectMenuBuilder()
-        .setCustomId('vc:kickSelect')
+        .setCustomId(`vc:kickSelect:${channel.id}`)
         .setPlaceholder('Select a member in this room to disconnect')
         .setMaxValues(1)
         .addOptions(options);
@@ -717,7 +821,7 @@ async function handlePanelButton(interaction) {
     }
     case 'ban': {
       const select = new UserSelectMenuBuilder()
-        .setCustomId('vc:banSelect')
+        .setCustomId(`vc:banSelect:${channel.id}`)
         .setPlaceholder('Select a user to ban from this room')
         .setMaxValues(1);
       return interaction.reply({
@@ -728,7 +832,7 @@ async function handlePanelButton(interaction) {
     }
     case 'permit': {
       const select = new UserSelectMenuBuilder()
-        .setCustomId('vc:permitSelect')
+        .setCustomId(`vc:permitSelect:${channel.id}`)
         .setPlaceholder('Select a user to permit')
         .setMaxValues(1);
       return interaction.reply({
@@ -752,7 +856,7 @@ async function handlePanelButton(interaction) {
         MuteMembers: true,
         Connect: true,
       });
-      return interaction.reply({ content: 'You are now the owner of this room.', ephemeral: true });
+      return interaction.update(buildRoomControls(channel, room));
     }
     case 'invite': {
       const invite = await channel.createInvite({ maxAge: 3600, maxUses: 0 });
@@ -767,12 +871,10 @@ async function handlePanelButton(interaction) {
 }
 
 async function handlePanelModal(interaction) {
-  const info = getMemberRoom(interaction);
+  const [, modalName, roomId] = interaction.customId.split(':');
+  const info = await resolveRoomById(roomId, interaction.guild);
   if (!info) {
-    return interaction.reply({
-      content: "You're not currently connected to one of your rooms. Join your voice room first.",
-      ephemeral: true,
-    });
+    return interaction.update({ content: 'That room no longer exists.', embeds: [], components: [] });
   }
   const { channel, room } = info;
   if (interaction.user.id !== room.ownerId) {
@@ -780,7 +882,7 @@ async function handlePanelModal(interaction) {
   }
   const value = interaction.fields.getTextInputValue('value').trim();
 
-  if (interaction.customId === 'vc:limitModal') {
+  if (modalName === 'limitModal') {
     const n = Number.parseInt(value, 10);
     if (Number.isNaN(n) || n < 0 || n > 99) {
       return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
@@ -801,15 +903,14 @@ async function handlePanelModal(interaction) {
       });
     }
     await channel.setUserLimit(n);
-    return interaction.reply({
-      content: `User limit set to ${n === 0 ? 'unlimited' : n}.`,
-      ephemeral: true,
-    });
+    return interaction.update(buildRoomControls(channel, room));
   }
 
-  if (interaction.customId === 'vc:renameModal') {
+  if (modalName === 'renameModal') {
     await channel.setName(value);
-    return interaction.reply({ content: `Room renamed to "${value}".`, ephemeral: true });
+    room.name = value;
+    persistRooms();
+    return interaction.update(buildRoomControls(channel, room));
   }
 }
 
@@ -848,12 +949,10 @@ async function handleCreatePick(interaction) {
 }
 
 async function handlePanelSelect(interaction) {
-  const info = getMemberRoom(interaction);
+  const [, selectName, roomId] = interaction.customId.split(':');
+  const info = await resolveRoomById(roomId, interaction.guild);
   if (!info) {
-    return interaction.update({
-      content: "You're not currently connected to one of your rooms.",
-      components: [],
-    });
+    return interaction.update({ content: 'That room no longer exists.', components: [] });
   }
   const { channel, room } = info;
   if (interaction.user.id !== room.ownerId) {
@@ -861,7 +960,7 @@ async function handlePanelSelect(interaction) {
   }
   const targetId = interaction.values[0];
 
-  if (interaction.customId === 'vc:kickSelect') {
+  if (selectName === 'kickSelect') {
     const member = await channel.guild.members.fetch(targetId).catch(() => null);
     if (member?.voice?.channelId === channel.id) {
       await member.voice.disconnect('Removed by room owner');
@@ -870,7 +969,7 @@ async function handlePanelSelect(interaction) {
     return interaction.update({ content: 'That user is no longer in this room.', components: [] });
   }
 
-  if (interaction.customId === 'vc:banSelect') {
+  if (selectName === 'banSelect') {
     if (targetId === room.ownerId) {
       return interaction.update({ content: 'You cannot ban yourself.', components: [] });
     }
@@ -896,7 +995,7 @@ async function handlePanelSelect(interaction) {
     });
   }
 
-  if (interaction.customId === 'vc:permitSelect') {
+  if (selectName === 'permitSelect') {
     // Also clears a ban (re-allows Connect + ViewChannel).
     await channel.permissionOverwrites.edit(targetId, { Connect: true, ViewChannel: true });
     return interaction.update({ content: `Permitted <@${targetId}> to join this room.`, components: [] });
