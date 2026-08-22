@@ -31,7 +31,7 @@ function save() {
 }
 
 // Returns (creating if needed) a user's record: { xp, level, coins,
-// lastMessageXpAt, lastWorkAt }.
+// lastMessageXpAt, lastWorkAt, lastDailyAt, dailyStreak, partnerId }.
 export function getUser(userId) {
   const users = load();
   if (!users[userId]) {
@@ -41,12 +41,19 @@ export function getUser(userId) {
       coins: 0,
       lastMessageXpAt: 0,
       lastWorkAt: 0,
+      lastDailyAt: 0,
+      dailyStreak: 0,
+      partnerId: null,
     };
   }
-  // Backward compat: users created before /work replaced /wh + /wb won't
-  // have lastWorkAt yet.
-  if (users[userId].lastWorkAt === undefined) users[userId].lastWorkAt = 0;
-  return users[userId];
+  // Backward compat: fill in fields added after a user's record was first
+  // created.
+  const user = users[userId];
+  if (user.lastWorkAt === undefined) user.lastWorkAt = 0;
+  if (user.lastDailyAt === undefined) user.lastDailyAt = 0;
+  if (user.dailyStreak === undefined) user.dailyStreak = 0;
+  if (user.partnerId === undefined) user.partnerId = null;
+  return user;
 }
 
 export function saveUsers() {

@@ -48,6 +48,13 @@ const MESSAGE_XP_COOLDOWN_MS = 60 * 1000; // one XP-earning message per minute p
 const WORK_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 const WORK_MIN = 100;
 const WORK_MAX = 300;
+const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000; // can't re-claim within 24h
+// Claiming again within this window (from the last claim) keeps the streak
+// going; waiting longer than this breaks it back to 0.
+const DAILY_STREAK_WINDOW_MS = 48 * 60 * 60 * 1000;
+const DAILY_BASE = 200; // coins on a fresh (streak 1) claim
+const DAILY_STREAK_BONUS = 20; // extra coins per streak day
+const DAILY_STREAK_CAP = 30; // streak bonus stops growing past this many days
 const EMPTY_GRACE_MS = 5 * 60 * 1000; // delete an empty game room after 5 minutes
 const TICK_INTERVAL_MS = 60 * 1000; // voice-XP + empty-room sweep cadence
 
@@ -406,6 +413,9 @@ client.on('interactionCreate', async (interaction) => {
     ) {
       return await handlePanelSelect(interaction);
     }
+    if (interaction.isButton() && interaction.customId.startsWith('couple:')) {
+      return await handleCoupleButton(interaction);
+    }
   } catch (err) {
     console.error('Interaction handler error:', err);
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
@@ -594,6 +604,29 @@ async function handlePanelSelect(interaction) {
   }
 }
 
+// customId format: couple:accept:<proposerId>:<targetId> / couple:decline:<proposerId>:<targetId>
+async function handleCoupleButton(interaction) {
+  const [, action, proposerId, targetId] = interaction.customId.split(':');
+  if (interaction.user.id !== targetId) {
+    return interaction.reply({ content: 'This proposal is not for you.', ephemeral: true });
+  }
+
+  if (action === 'decline') {
+    return interaction.update({ content: `<@${targetId}> declined the couple proposal.`, components: [] });
+  }
+
+  const proposer = getUser(proposerId);
+  const target = getUser(targetId);
+  if (proposer.partnerId || target.partnerId) {
+    return interaction.update({ content: 'One of you is already coupled with someone else.', components: [] });
+  }
+
+  proposer.partnerId = targetId;
+  target.partnerId = proposerId;
+  saveUsers();
+  return interaction.update({ content: `💞 <@${proposerId}> and <@${targetId}> are now a couple!`, components: [] });
+}
+
 async function handleSlashCommand(interaction) {
   const { commandName } = interaction;
 
@@ -616,6 +649,36 @@ async function handleSlashCommand(interaction) {
     return interaction.reply(`💼 ${interaction.user} worked for an hour and earned a paycheck of **${earned} coins**!`);
   }
 
+  if (commandName === 'daily') {
+    const user = getUser(interaction.user.id);
+    const now = Date.now();
+    const isFirstClaim = user.lastDailyAt === 0;
+    const sinceLast = now - user.lastDailyAt;
+
+    if (!isFirstClaim && sinceLast < DAILY_COOLDOWN_MS) {
+      const remaining = DAILY_COOLDOWN_MS - sinceLast;
+      const hours = Math.floor(remaining / 3600000);
+      const mins = Math.ceil((remaining % 3600000) / 60000);
+      return interaction.reply({
+        content: `You already claimed your daily reward — come back in ${hours}h ${mins}m. Current streak: **${user.dailyStreak}**.`,
+        ephemeral: true,
+      });
+    }
+
+    // Missed the streak window (more than 48h since the last claim) => reset.
+    const streakBroken = !isFirstClaim && sinceLast > DAILY_STREAK_WINDOW_MS;
+    user.dailyStreak = isFirstClaim || streakBroken ? 1 : user.dailyStreak + 1;
+    const earned = DAILY_BASE + Math.min(user.dailyStreak, DAILY_STREAK_CAP) * DAILY_STREAK_BONUS;
+    user.lastDailyAt = now;
+    user.coins += earned;
+    saveUsers();
+
+    const streakNote = streakBroken ? ' (streak reset — claim daily to build it back up!)' : '';
+    return interaction.reply(
+      `📅 ${interaction.user} claimed their daily reward: **${earned} coins** — streak: **${user.dailyStreak}** day(s)${streakNote}.`,
+    );
+  }
+
   if (commandName === 'balance') {
     const target = interaction.options.getUser('user') ?? interaction.user;
     const user = getUser(target.id);
@@ -633,6 +696,85 @@ async function handleSlashCommand(interaction) {
       content: `${target}: **Level ${user.level}** — ${user.xp} XP (${need} XP to next level) — **${user.coins} coins**`,
       ephemeral: target.id === interaction.user.id,
     });
+  }
+
+  if (commandName === 'couple') {
+    return await handleCoupleCommand(interaction);
+  }
+}
+
+async function handleCoupleCommand(interaction) {
+  const sub = interaction.options.getSubcommand();
+  const user = getUser(interaction.user.id);
+
+  if (sub === 'propose') {
+    const target = interaction.options.getUser('user');
+    if (target.id === interaction.user.id) {
+      return interaction.reply({ content: 'You cannot couple with yourself.', ephemeral: true });
+    }
+    if (target.bot) {
+      return interaction.reply({ content: 'You cannot couple with a bot.', ephemeral: true });
+    }
+    if (user.partnerId) {
+      return interaction.reply({
+        content: `You are already coupled with <@${user.partnerId}>. Use \`/couple breakup\` first.`,
+        ephemeral: true,
+      });
+    }
+    const targetUser = getUser(target.id);
+    if (targetUser.partnerId) {
+      return interaction.reply({ content: `${target} is already coupled with someone else.`, ephemeral: true });
+    }
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`couple:accept:${interaction.user.id}:${target.id}`)
+        .setLabel('Accept')
+        .setEmoji('💞')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`couple:decline:${interaction.user.id}:${target.id}`)
+        .setLabel('Decline')
+        .setStyle(ButtonStyle.Danger),
+    );
+    return interaction.reply({
+      content: `${target}, ${interaction.user} wants to be your couple! Coupled partners can share coins with \`/couple share\`.`,
+      components: [row],
+    });
+  }
+
+  if (sub === 'status') {
+    if (!user.partnerId) {
+      return interaction.reply({ content: "You're not coupled with anyone yet — try `/couple propose`.", ephemeral: true });
+    }
+    return interaction.reply({ content: `You are coupled with <@${user.partnerId}> 💞`, ephemeral: true });
+  }
+
+  if (sub === 'breakup') {
+    if (!user.partnerId) {
+      return interaction.reply({ content: "You're not coupled with anyone.", ephemeral: true });
+    }
+    const partner = getUser(user.partnerId);
+    const partnerId = user.partnerId;
+    partner.partnerId = null;
+    user.partnerId = null;
+    saveUsers();
+    return interaction.reply(`💔 ${interaction.user} broke up with <@${partnerId}>.`);
+  }
+
+  if (sub === 'share') {
+    if (!user.partnerId) {
+      return interaction.reply({ content: "You're not coupled with anyone yet.", ephemeral: true });
+    }
+    const amount = interaction.options.getInteger('amount');
+    if (amount > user.coins) {
+      return interaction.reply({ content: `You only have **${user.coins} coins**.`, ephemeral: true });
+    }
+    const partner = getUser(user.partnerId);
+    user.coins -= amount;
+    partner.coins += amount;
+    saveUsers();
+    return interaction.reply(`💸 ${interaction.user} shared **${amount} coins** with <@${user.partnerId}>.`);
   }
 }
 
