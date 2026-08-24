@@ -701,6 +701,37 @@ async function handleSlashCommand(interaction) {
   if (commandName === 'couple') {
     return await handleCoupleCommand(interaction);
   }
+
+  if (commandName === 'help') {
+    const embed = new EmbedBuilder()
+      .setTitle('🧊 Olaf — Command List')
+      .setColor(0x5865f2)
+      .addFields(
+        { name: '🎮 Rooms', value: 'Join the game lobby voice channel and pick a game from the dropdown in `#pengaturan` to get your own game room, with owner controls posted in its chat.' },
+        {
+          name: '⭐ XP & Level',
+          value: 'Earn XP by voice-chatting in a game room (5 XP/min) and chatting there (3 XP/msg). Leveling up pays a coin bonus automatically.',
+        },
+        {
+          name: '💰 Coins',
+          value:
+            '`/work` — claim a paycheck (100-300 coins), 1h cooldown.\n' +
+            '`/daily` — claim daily coins with a streak bonus, 24h cooldown (streak resets if you skip 48h+).\n' +
+            '`/balance [user]` — check coin balance.\n' +
+            '`/level [user]` — check level and XP.',
+        },
+        {
+          name: '💞 Couple',
+          value:
+            '`/couple propose <user>` — ask someone to be your couple.\n' +
+            '`/couple share <amount>` — send coins to your partner.\n' +
+            '`/couple status` — check your current pairing.\n' +
+            '`/couple breakup` — end the pairing.',
+        },
+        { name: 'ℹ️ Help', value: '`/help` — show this message.' },
+      );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
 }
 
 async function handleCoupleCommand(interaction) {

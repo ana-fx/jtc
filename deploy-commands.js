@@ -30,6 +30,7 @@ const commands = [
     .setDescription('Check your (or someone else\'s) level and XP')
     .addUserOption((opt) => opt.setName('user').setDescription('Whose level to check'))
     .toJSON(),
+  new SlashCommandBuilder().setName('help').setDescription('List all Olaf commands and how they work').toJSON(),
   new SlashCommandBuilder()
     .setName('couple')
     .setDescription('Pair up with another member to share coins')

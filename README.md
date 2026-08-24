@@ -8,6 +8,7 @@ A Discord bot for the "Ruang Game" (Game Room) category:
 4. **Coins** — `/work` pays out a random paycheck (100-300 coins) on a 1-hour cooldown. `/daily` pays a base 200 coins plus 20 per streak day (capped at streak 30) once every 24h; claiming again within 48h of the last claim keeps the streak going, waiting longer resets it to 0. Leveling up also pays a flat coin reward per band: levels 1-5 pay 500, 6-10 pay 750, 11-15 pay 1000, and so on (+250 every 5 levels).
 5. `/balance` and `/level` check your (or someone else's) coins / level+XP.
 6. **Couples** — `/couple propose @user` sends an Accept/Decline button; once accepted, both members are paired. `/couple share <amount>` transfers coins from you to your partner. `/couple status` shows your current partner, `/couple breakup` ends the pairing (frees both members to couple again).
+7. `/help` — lists all commands and how they work.
 
 Shop and gacha cards are intentionally **not** included yet — planned for a later phase.
 
