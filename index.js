@@ -18,7 +18,7 @@ import { loadConfig, saveConfig } from './config.js';
 import { getUser, saveUsers } from './store.js';
 import { addXp, xpToNextLevel } from './leveling.js';
 
-const { DISCORD_TOKEN, GAME_LOBBY_CHANNEL_ID, GAMES } = process.env;
+const { DISCORD_TOKEN, GAME_LOBBY_CHANNEL_ID, GAMES_PC, GAMES_MOBILE } = process.env;
 
 if (!DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is not set in the .env file');
@@ -29,15 +29,21 @@ if (!GAME_LOBBY_CHANNEL_ID) {
   process.exit(1);
 }
 
-// Comma-separated list of games offered in the room-creation picker, e.g.
-// "Mobile Legends,PUBG,Valorant,Free Fire".
-const games = (
-  GAMES ||
-  'Mobile Legends,PUBG Mobile,Free Fire,Call of Duty Mobile,Valorant,Genshin Impact,Clash Royale,Clash of Clans,Brawl Stars,Wild Rift,Arena of Valor,eFootball'
-)
-  .split(',')
-  .map((g) => g.trim())
-  .filter(Boolean);
+function parseGameList(value, fallback) {
+  return (value || fallback)
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+}
+
+// Comma-separated lists of games offered in the room-creation picker, split
+// into two dropdowns (PC / Mobile) the same way the reference bot does it.
+const pcGames = parseGameList(GAMES_PC, 'Valorant,Minecraft,Roblox');
+const mobileGames = parseGameList(
+  GAMES_MOBILE,
+  'Mobile Legends,PUBG Mobile,Free Fire,Call of Duty Mobile,Genshin Impact,Clash Royale,Clash of Clans,Brawl Stars,Wild Rift,Arena of Valor,eFootball,Honor of Kings',
+);
+const games = [...pcGames, ...mobileGames];
 
 const config = loadConfig();
 
@@ -132,12 +138,20 @@ function buildGamePicker() {
         `connected to <#${GAME_LOBBY_CHANNEL_ID}>** while picking.`,
     );
 
-  const select = new StringSelectMenuBuilder()
-    .setCustomId('game:pick')
-    .setPlaceholder('Select a game')
-    .addOptions(games.slice(0, 25).map((game) => ({ label: game, value: game })));
+  const pcSelect = new StringSelectMenuBuilder()
+    .setCustomId('game:pick:pc')
+    .setPlaceholder('PC Game List')
+    .addOptions(pcGames.slice(0, 25).map((game) => ({ label: game, value: game })));
 
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] };
+  const mobileSelect = new StringSelectMenuBuilder()
+    .setCustomId('game:pick:mobile')
+    .setPlaceholder('Mobile Game List')
+    .addOptions(mobileGames.slice(0, 25).map((game) => ({ label: game, value: game })));
+
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(pcSelect), new ActionRowBuilder().addComponents(mobileSelect)],
+  };
 }
 
 /**
@@ -398,7 +412,7 @@ client.on('messageCreate', async (message) => {
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) return await handleSlashCommand(interaction);
-    if (interaction.isStringSelectMenu() && interaction.customId === 'game:pick') {
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('game:pick')) {
       return await handleGamePick(interaction);
     }
     if (interaction.isButton() && interaction.customId.startsWith('vc:')) {

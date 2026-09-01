@@ -46,7 +46,8 @@ cp .env.example .env
 | `CLIENT_ID` | General Information → Application ID |
 | `GUILD_ID` | Right-click server name → Copy Server ID |
 | `GAME_LOBBY_CHANNEL_ID` | Right-click the "Ruang Game" voice channel → Copy Channel ID |
-| `GAMES` | Comma-separated game names for the picker (max 25) |
+| `GAMES_PC` | Comma-separated PC game names for the "PC Game List" dropdown (max 25) |
+| `GAMES_MOBILE` | Comma-separated mobile game names for the "Mobile Game List" dropdown (max 25) |
 
 The category the lobby sits in must have a text channel with "pengaturan" somewhere in its name — that's where the game picker gets posted.
 
