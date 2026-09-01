@@ -18,7 +18,10 @@ function load() {
     return cache;
   }
   try {
-    cache = JSON.parse(readFileSync(STORE_PATH, 'utf8'));
+    const parsed = JSON.parse(readFileSync(STORE_PATH, 'utf8'));
+    // JSON.parse succeeds on non-object values too (null, arrays, numbers,
+    // ...); guard against those so a corrupted file can't crash getUser().
+    cache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch (err) {
     console.error('Failed to read users.json, starting empty:', err);
     cache = {};
