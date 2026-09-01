@@ -19,7 +19,14 @@ import { getUser, saveUsers } from './store.js';
 import { getRecipe, listRecipes, setRecipe, deleteRecipe } from './recipes.js';
 import { addXp, xpToNextLevel } from './leveling.js';
 
-const { DISCORD_TOKEN, GAME_LOBBY_CHANNEL_ID, GAMES_PC, GAMES_MOBILE } = process.env;
+const {
+  DISCORD_TOKEN,
+  GAME_LOBBY_CHANNEL_ID,
+  GAMES_PC,
+  GAMES_MOBILE,
+  REPORT_CHANNEL_ID,
+  RESEP_CHANNEL_ID,
+} = process.env;
 
 if (!DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is not set in the .env file');
@@ -780,6 +787,10 @@ async function handleSlashCommand(interaction) {
 }
 
 async function handleResepCommand(interaction) {
+  if (RESEP_CHANNEL_ID && interaction.channelId !== RESEP_CHANNEL_ID) {
+    return interaction.reply({ content: `Please use \`/resep\` in <#${RESEP_CHANNEL_ID}>.`, ephemeral: true });
+  }
+
   const sub = interaction.options.getSubcommand();
   const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false;
 
@@ -856,6 +867,10 @@ async function handleAnnounceCommand(interaction) {
 // Escalating moderation: 1st report -> 12h timeout, 3rd -> 5 day timeout,
 // 5th -> ban. Staff-only (default member permission: Moderate Members).
 async function handleReportCommand(interaction) {
+  if (REPORT_CHANNEL_ID && interaction.channelId !== REPORT_CHANNEL_ID) {
+    return interaction.reply({ content: `Please use \`/report\` in <#${REPORT_CHANNEL_ID}>.`, ephemeral: true });
+  }
+
   const target = interaction.options.getUser('user');
   const reason = interaction.options.getString('reason');
 
