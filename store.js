@@ -34,7 +34,8 @@ function save() {
 }
 
 // Returns (creating if needed) a user's record: { xp, level, coins,
-// lastMessageXpAt, lastWorkAt, lastDailyAt, dailyStreak, partnerId }.
+// lastMessageXpAt, lastWorkAt, lastDailyAt, dailyStreak, partnerId,
+// reportCount }.
 export function getUser(userId) {
   const users = load();
   if (!users[userId]) {
@@ -47,6 +48,7 @@ export function getUser(userId) {
       lastDailyAt: 0,
       dailyStreak: 0,
       partnerId: null,
+      reportCount: 0,
     };
   }
   // Backward compat: fill in fields added after a user's record was first
@@ -56,6 +58,7 @@ export function getUser(userId) {
   if (user.lastDailyAt === undefined) user.lastDailyAt = 0;
   if (user.dailyStreak === undefined) user.dailyStreak = 0;
   if (user.partnerId === undefined) user.partnerId = null;
+  if (user.reportCount === undefined) user.reportCount = 0;
   return user;
 }
 

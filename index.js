@@ -742,10 +742,63 @@ async function handleSlashCommand(interaction) {
             '`/couple status` — check your current pairing.\n' +
             '`/couple breakup` — end the pairing.',
         },
+        {
+          name: '🛡️ Moderation (staff only)',
+          value:
+            '`/report <user> <reason>` — report a member; escalates automatically ' +
+            '(1st report: 12h timeout, 3rd: 5 day timeout, 5th: ban).',
+        },
         { name: 'ℹ️ Help', value: '`/help` — show this message.' },
       );
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
+
+  if (commandName === 'report') {
+    return await handleReportCommand(interaction);
+  }
+}
+
+// Escalating moderation: 1st report -> 12h timeout, 3rd -> 5 day timeout,
+// 5th -> ban. Staff-only (default member permission: Moderate Members).
+async function handleReportCommand(interaction) {
+  const target = interaction.options.getUser('user');
+  const reason = interaction.options.getString('reason');
+
+  if (target.id === interaction.user.id) {
+    return interaction.reply({ content: 'You cannot report yourself.', ephemeral: true });
+  }
+  if (target.bot) {
+    return interaction.reply({ content: 'You cannot report a bot.', ephemeral: true });
+  }
+
+  const targetUser = getUser(target.id);
+  targetUser.reportCount += 1;
+  const count = targetUser.reportCount;
+  saveUsers();
+
+  const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+  let actionText = `No new action — ${count} report(s) so far.`;
+
+  try {
+    if (count === 5) {
+      if (member) await member.ban({ reason: `5th report — latest: ${reason}` });
+      actionText = '☠️ **Banned** (5th report).';
+    } else if (count === 3) {
+      if (member) await member.timeout(5 * 24 * 60 * 60 * 1000, `3rd report — latest: ${reason}`);
+      actionText = '⏳ **Timed out for 5 days** (3rd report).';
+    } else if (count === 1) {
+      if (member) await member.timeout(12 * 60 * 60 * 1000, `1st report — latest: ${reason}`);
+      actionText = '⏳ **Timed out for 12 hours** (1st report).';
+    }
+  } catch (err) {
+    console.error('Failed to apply report action:', err);
+    actionText = `⚠️ Report recorded but the moderation action failed (${err?.rawError?.message ?? err.message ?? 'unknown error'}). Check the bot's role position/permissions.`;
+  }
+
+  return interaction.reply(
+    `🚨 ${target} reported by ${interaction.user} — reason: ${reason}\n` +
+      `Total reports: **${count}**\n${actionText}`,
+  );
 }
 
 async function handleCoupleCommand(interaction) {

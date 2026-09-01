@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } from 'discord.js';
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
 
@@ -50,6 +50,13 @@ const commands = [
           opt.setName('amount').setDescription('How many coins to share').setRequired(true).setMinValue(1),
         ),
     )
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName('report')
+    .setDescription('Report a member for rule-breaking — escalates timeouts/ban automatically')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+    .addUserOption((opt) => opt.setName('user').setDescription('Who to report').setRequired(true))
+    .addStringOption((opt) => opt.setName('reason').setDescription('Why are you reporting them?').setRequired(true))
     .toJSON(),
 ];
 
