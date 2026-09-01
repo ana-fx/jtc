@@ -3,3 +3,4 @@ node_modules/
 *.log
 config.json
 users.json
+recipes.json

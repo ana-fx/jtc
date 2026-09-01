@@ -52,6 +52,37 @@ const commands = [
     )
     .toJSON(),
   new SlashCommandBuilder()
+    .setName('resep')
+    .setDescription("Grandma's recipe book")
+    .addSubcommand((sub) =>
+      sub
+        .setName('add')
+        .setDescription('Add or update a recipe (admin only)')
+        .addStringOption((opt) => opt.setName('nama').setDescription('Recipe name').setRequired(true))
+        .addStringOption((opt) => opt.setName('isi').setDescription('Recipe content').setRequired(true)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('lihat')
+        .setDescription('View a recipe')
+        .addStringOption((opt) => opt.setName('nama').setDescription('Recipe name').setRequired(true)),
+    )
+    .addSubcommand((sub) => sub.setName('list').setDescription('List all saved recipe names'))
+    .addSubcommand((sub) =>
+      sub
+        .setName('hapus')
+        .setDescription('Delete a recipe (admin only)')
+        .addStringOption((opt) => opt.setName('nama').setDescription('Recipe name').setRequired(true)),
+    )
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName('announce')
+    .setDescription('Post an @everyone announcement (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((opt) => opt.setName('message').setDescription('Announcement text').setRequired(true))
+    .addChannelOption((opt) => opt.setName('channel').setDescription('Where to post (defaults to this channel)'))
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName('report')
     .setDescription('Report a member for rule-breaking — escalates timeouts/ban automatically')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)

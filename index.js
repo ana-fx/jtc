@@ -16,6 +16,7 @@ import {
 } from 'discord.js';
 import { loadConfig, saveConfig } from './config.js';
 import { getUser, saveUsers } from './store.js';
+import { getRecipe, listRecipes, setRecipe, deleteRecipe } from './recipes.js';
 import { addXp, xpToNextLevel } from './leveling.js';
 
 const { DISCORD_TOKEN, GAME_LOBBY_CHANNEL_ID, GAMES_PC, GAMES_MOBILE } = process.env;
@@ -748,6 +749,18 @@ async function handleSlashCommand(interaction) {
             '`/report <user> <reason>` — report a member; escalates automatically ' +
             '(1st report: 12h timeout, 3rd: 5 day timeout, 5th: ban).',
         },
+        {
+          name: "🍲 Grandma's Recipes",
+          value:
+            '`/resep add <nama> <isi>` — save a recipe (admin only).\n' +
+            '`/resep lihat <nama>` — view a recipe.\n' +
+            '`/resep list` — list all saved recipe names.\n' +
+            '`/resep hapus <nama>` — delete a recipe (admin only).',
+        },
+        {
+          name: '📢 Announcements (admin only)',
+          value: '`/announce <message> [channel]` — posts an @everyone announcement (defaults to the current channel).',
+        },
         { name: 'ℹ️ Help', value: '`/help` — show this message.' },
       );
     return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -756,6 +769,88 @@ async function handleSlashCommand(interaction) {
   if (commandName === 'report') {
     return await handleReportCommand(interaction);
   }
+
+  if (commandName === 'resep') {
+    return await handleResepCommand(interaction);
+  }
+
+  if (commandName === 'announce') {
+    return await handleAnnounceCommand(interaction);
+  }
+}
+
+async function handleResepCommand(interaction) {
+  const sub = interaction.options.getSubcommand();
+  const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false;
+
+  if (sub === 'add') {
+    if (!isAdmin) {
+      return interaction.reply({ content: 'Only admins can add recipes.', ephemeral: true });
+    }
+    const nama = interaction.options.getString('nama');
+    const isi = interaction.options.getString('isi');
+    setRecipe(nama, isi, interaction.user.tag);
+    return interaction.reply(`📖 Recipe **${nama}** saved.`);
+  }
+
+  if (sub === 'lihat') {
+    const nama = interaction.options.getString('nama');
+    const recipe = getRecipe(nama);
+    if (!recipe) {
+      return interaction.reply({ content: `No recipe found named **${nama}**.`, ephemeral: true });
+    }
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`🍲 ${recipe.name}`)
+      .setDescription(recipe.content)
+      .setFooter({ text: `Added by ${recipe.addedBy}` });
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  if (sub === 'list') {
+    const recipes = listRecipes();
+    if (recipes.length === 0) {
+      return interaction.reply({ content: 'No recipes saved yet.', ephemeral: true });
+    }
+    return interaction.reply(`📖 Recipes: ${recipes.map((r) => r.name).join(', ')}`);
+  }
+
+  if (sub === 'hapus') {
+    if (!isAdmin) {
+      return interaction.reply({ content: 'Only admins can delete recipes.', ephemeral: true });
+    }
+    const nama = interaction.options.getString('nama');
+    const deleted = deleteRecipe(nama);
+    return interaction.reply(deleted ? `🗑️ Recipe **${nama}** deleted.` : `No recipe found named **${nama}**.`);
+  }
+}
+
+async function handleAnnounceCommand(interaction) {
+  const message = interaction.options.getString('message');
+  const channel = interaction.options.getChannel('channel') ?? interaction.channel;
+
+  if (!channel?.isTextBased?.()) {
+    return interaction.reply({ content: 'Pick a text channel to announce in.', ephemeral: true });
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0xffcc00)
+    .setTitle('📢 Announcement')
+    .setDescription(message)
+    .setFooter({ text: `Posted by ${interaction.user.tag}` })
+    .setTimestamp();
+
+  try {
+    await channel.send({ content: '@everyone', embeds: [embed] });
+  } catch (err) {
+    console.error('Failed to post announcement:', err);
+    return interaction.reply({
+      content: `Failed to post: ${err?.rawError?.message ?? err.message ?? 'unknown error'}`,
+      ephemeral: true,
+    });
+  }
+
+  return interaction.reply({ content: `✅ Announcement posted in ${channel}.`, ephemeral: true });
 }
 
 // Escalating moderation: 1st report -> 12h timeout, 3rd -> 5 day timeout,

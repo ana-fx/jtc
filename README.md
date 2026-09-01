@@ -10,6 +10,8 @@ A Discord bot for the "Ruang Game" (Game Room) category:
 6. **Couples** — `/couple propose @user` sends an Accept/Decline button; once accepted, both members are paired. `/couple share <amount>` transfers coins from you to your partner. `/couple status` shows your current partner, `/couple breakup` ends the pairing (frees both members to couple again).
 7. `/help` — lists all commands and how they work.
 8. **Moderation** — `/report <user> <reason>` (staff only, requires the Moderate Members permission) tracks a per-user report count and escalates automatically: 1st report = 12h timeout, 3rd report = 5 day timeout, 5th report = ban. Requires the bot's role to have Timeout Members / Ban Members and sit above the reported member's highest role.
+9. **Grandma's recipes** — `/resep add <nama> <isi>` and `/resep hapus <nama>` are admin-only (checked against the Discord Administrator permission); `/resep lihat <nama>` and `/resep list` are open to everyone. Stored in `recipes.json`.
+10. **Announcements** — `/announce <message> [channel]` (admin-only) posts an `@everyone` embed, defaulting to the channel the command was run in. Requires the bot's role to have the "Mention @everyone" permission.
 
 Shop and gacha cards are intentionally **not** included yet — planned for a later phase.
 
