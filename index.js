@@ -26,7 +26,20 @@ const {
   GAMES_MOBILE,
   REPORT_CHANNEL_ID,
   RESEP_CHANNEL_ID,
+  BOT_CHANNEL_IDS,
 } = process.env;
+
+// Comma-separated list of text channels where general commands (/work,
+// /daily, /balance, /level, /couple, /help) are allowed — e.g. the "allbot"
+// channels in ARCADE AREA. A game room's own auto-created chat is never in
+// this list, so commands naturally don't work there. /report and /resep have
+// their own separate channel restriction and are exempt from this one.
+const botChannelIds = new Set(
+  (BOT_CHANNEL_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean),
+);
 
 if (!DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is not set in the .env file');
@@ -651,6 +664,15 @@ async function handleCoupleButton(interaction) {
 
 async function handleSlashCommand(interaction) {
   const { commandName } = interaction;
+
+  if (
+    botChannelIds.size > 0 &&
+    !['report', 'resep'].includes(commandName) &&
+    !botChannelIds.has(interaction.channelId)
+  ) {
+    const list = [...botChannelIds].map((id) => `<#${id}>`).join(', ');
+    return interaction.reply({ content: `Please use Olaf commands in: ${list}`, ephemeral: true });
+  }
 
   if (commandName === 'work') {
     const user = getUser(interaction.user.id);

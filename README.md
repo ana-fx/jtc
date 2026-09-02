@@ -12,7 +12,7 @@ A Discord bot for the "Ruang Game" (Game Room) category:
 8. **Moderation** — `/report <user> <reason>` (staff only, requires the Moderate Members permission) tracks a per-user report count and escalates automatically: 1st report = 12h timeout, 3rd report = 5 day timeout, 5th report = ban. Requires the bot's role to have Timeout Members / Ban Members and sit above the reported member's highest role.
 9. **Grandma's recipes** — `/resep add <nama> <isi>` and `/resep hapus <nama>` are admin-only (checked against the Discord Administrator permission); `/resep lihat <nama>` and `/resep list` are open to everyone. Stored in `recipes.json`. Set `RESEP_CHANNEL_ID` to confine the whole command to one text channel.
 10. **Announcements** — `/announce <message> [channel]` (admin-only) posts an `@everyone` embed, defaulting to the channel the command was run in. Requires the bot's role to have the "Mention @everyone" permission.
-11. **Channel restrictions** — `REPORT_CHANNEL_ID` and `RESEP_CHANNEL_ID` (both optional) confine `/report` and `/resep` to one text channel each, so staff can monitor everything in one place. Leave unset to allow the command anywhere. Game rooms are already implicitly confined to wherever `GAME_LOBBY_CHANNEL_ID` and its category live — see "Server setup" below.
+11. **Channel restrictions** — `REPORT_CHANNEL_ID` and `RESEP_CHANNEL_ID` (both optional) confine `/report` and `/resep` to one text channel each, so staff can monitor everything in one place. `BOT_CHANNEL_IDS` (optional, comma-separated) confines the general commands (`/work`, `/daily`, `/balance`, `/level`, `/couple`, `/help`) to a set of channels — e.g. dedicated "allbot" command channels — so they can't be used inside a game room's own auto-created chat. Leave any of these unset to allow the command anywhere. Game rooms themselves are already implicitly confined to wherever `GAME_LOBBY_CHANNEL_ID` and its category live — see "Server setup" below.
 
 Shop and gacha cards are intentionally **not** included yet — planned for a later phase.
 
@@ -54,6 +54,7 @@ cp .env.example .env
 | `GAMES_MOBILE` | Comma-separated mobile game names for the "Mobile Game List" dropdown (max 25) |
 | `REPORT_CHANNEL_ID` | *(optional)* Right-click the reports text channel → Copy Channel ID |
 | `RESEP_CHANNEL_ID` | *(optional)* Right-click the recipes text channel → Copy Channel ID |
+| `BOT_CHANNEL_IDS` | *(optional)* Comma-separated channel ids where general commands are allowed (e.g. the "allbot" channels) |
 
 The category the lobby sits in must have a text channel with "pengaturan" somewhere in its name — that's where the game picker gets posted.
 
