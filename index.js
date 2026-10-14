@@ -59,10 +59,10 @@ function parseGameList(value, fallback) {
 
 // Comma-separated lists of games offered in the room-creation picker, split
 // into two dropdowns (PC / Mobile) the same way the reference bot does it.
-const pcGames = parseGameList(GAMES_PC, 'Valorant,Minecraft,Roblox,Dota 2,PUBG,Counter-Strike 2');
+const pcGames = parseGameList(GAMES_PC, 'Valorant,Minecraft Java,Roblox,Dota 2,PUBG,Counter-Strike 2');
 const mobileGames = parseGameList(
   GAMES_MOBILE,
-  'Mobile Legends,PUBG Mobile,Free Fire,Call of Duty Mobile,Genshin Impact,Wild Rift,Arena of Valor,Honor of Kings',
+  'Mobile Legends,PUBG Mobile,Free Fire,Call of Duty Mobile,Genshin Impact,Wild Rift,Arena of Valor,Honor of Kings,Minecraft Bedrock',
 );
 const games = [...pcGames, ...mobileGames];
 
